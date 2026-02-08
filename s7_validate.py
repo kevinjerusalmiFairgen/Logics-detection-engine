@@ -42,11 +42,11 @@ ALLOWED_QUESTION_TYPES = {
     "numeric", 
     "open_text", 
     "grid", 
-    "numeric_grid"
 }
 
 ALLOWED_LOGIC_TYPES = {
-    "skip", 
+    "skip",
+    "section_skip",
     "exclusive", 
     "count", 
     "sum", 
@@ -175,7 +175,7 @@ def check_01_schema_exactness(final_json: Dict) -> dict:
 def check_02_allowed_types(final_json: Dict) -> dict:
     """
     Master prompt pre-flight #4, #5:
-    - Question types: single_select, multi_select, numeric, open_text, grid, numeric_grid
+    - Question types: single_select, multi_select, numeric, open_text, grid
     - Logic types: skip, exclusive, count, sum, piping, recode, custom
     """
     issues = []

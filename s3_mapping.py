@@ -125,10 +125,10 @@ The file MUST have this EXACT structure:
 {{
   "questions_mapped": [
     {{
-      "id": "Q1",
+      "id": "<question_id>",
       "section": "A", 
       "text": "Full question text",
-      "type": "single_select|multi_select|grid|numeric|open_text|numeric_grid",
+      "type": "single_select|multi_select|grid|numeric|open_text",
       "vars": ["VAR1"] or [["row1_vars"], ["row2_vars"]] for grids,
       "answers": {{}},
       "logics": []
@@ -148,7 +148,6 @@ QUESTION TYPE RULES (STRICT - FROM MASTER PROMPT)
 5) grid: vars is LIST OF LISTS
    - each inner list is one ROW containing dataset vars across columns
    - preserve questionnaire row order (reorder if dataset storage differs)
-6) numeric_grid: same as grid but for numeric inputs
 
 =============================================================================
 EVIDENCE-BASED MAPPING (USE AT LEAST 2 SIGNALS)
@@ -161,6 +160,13 @@ A) VARIABLE NAMING PATTERNS:
    - Numeric suffixes indicating set membership
    - Row/column patterns for grids (<VAR>_r1_c1, <VAR>_r1_c2, <VAR>_r2_c1)
    - Terminal codes: _97, _98, _99 often indicate exclusive anchors (None/DK/RF)
+   
+   PATTERN-BASED GROUPING:
+   - When you identify a naming pattern, use it as a search query to find ALL variables matching that pattern
+   - Patterns define groups: variables sharing a pattern likely belong together
+   - To create new groups: Search dataset_inventory for all variables matching an identified pattern
+   - To fill existing groups: After mapping some variables, search for additional variables matching the same pattern
+   - Verify completeness: Compare found variables against all variables matching the pattern in dataset_inventory
 
 B) VARIABLE LABELS:
    - Label text matches or closely resembles question text
@@ -191,6 +197,7 @@ HOW TO DETECT FROM DATA:
    - Each variable = one option, binary coded (0/1 selected/not)
    - vars = ["<VAR>_1", "<VAR>_2", "<VAR>_3", "<VAR>_97"] (flat list)
    - Include exclusive anchors (_97/_98/_99)
+   - Use the pattern to search dataset_inventory for all matching variables to ensure completeness
 
 2) GRID (2-dimensional, rows × columns):
    - Variables: <VAR>_r1_c1, <VAR>_r1_c2, <VAR>_r2_c1, <VAR>_r2_c2 (row AND column pattern)
@@ -200,16 +207,15 @@ HOW TO DETECT FROM DATA:
    - Each inner list = one row (one item rated on all attributes)
 
 CRITICAL - TYPE OVERRIDE RULES:
-- If PDF says "grid" but data has only <VAR>_1, <VAR>_2, <VAR>_3 pattern → it's MULTI_SELECT
-- If PDF says "multi_select" but data has <VAR>_r1_c1, <VAR>_r1_c2 pattern → it's GRID
 - DATA STRUCTURE WINS over PDF description
-- Grid requires BOTH row AND column dimensions in variable names
+- Grid requires BOTH row AND column dimensions in variable names (r1_c1, r1_c2, r2_c1)
+- If variables have only row pattern (r1, r2, r3) with NO column dimension → MULTI_SELECT
+- If PDF says "grid" but data has only single-dimension pattern → override to MULTI_SELECT
+- If PDF says "multi_select" but data has true 2D pattern → override to GRID
 
-DETECTION EXAMPLES:
-- "<VAR>_1, <VAR>_2, <VAR>_3" = multi_select (single dimension, option suffixes)
-- "<VAR>_r1_c1, <VAR>_r1_c2, <VAR>_r2_c1" = grid (two dimensions: r1/r2 AND c1/c2)
-- "<VAR>_<Item1>, <VAR>_<Item2>, <VAR>_<Item3>" = multi_select (items, not rows×cols)
-- "<VAR>_<Item1>_<Attr1>, <VAR>_<Item1>_<Attr2>, <VAR>_<Item2>_<Attr1>" = grid (item × attribute)
+DETECTION PRINCIPLE:
+- Single dimension pattern (suffixes only, or rows only) → multi_select
+- Two dimension pattern (rows AND columns both present) → grid
 
 3) OTHER-SPECIFY PAIRS:
    - Main question variable + "_OTH" or "_OTHER" or "_SPECIFY" suffix
@@ -280,6 +286,7 @@ BEFORE SAVING, VERIFY:
 - Count unmapped_vars
 - Sum must equal total vars in dataset_inventory
 - If not equal, find the missing vars and add to unmapped_vars
+- For multi-select questions: Search dataset_inventory for all variables matching the pattern to ensure completeness
 '''
 
 

@@ -150,20 +150,22 @@ For each potential rule, classify using this order:
 LOGIC DEFINITIONS (SINGLE SOURCE OF TRUTH)
 =============================================================================
 
-A) skip
--------
+A) skip / section_skip
+----------------------
 - MEANING: Current target question is NOT asked when condition is TRUE.
+- Use "section_skip" when the skip originates from a section gate; use "skip" for question-level routing.
+- Simplify logically equivalent conditions into one rule.
 - PLACEMENT: ONLY on target question(s) being skipped. NEVER on source question.
 - CONDITION SEMANTICS: TRUE => skip this question (do not ask it)
 - source_vars: Gating variable(s) referenced in the condition
 - target_vars: MUST EQUAL current question's vars (this is mandatory!)
 - FOR ASK-IF RULES: Invert the ask-if condition into a skip condition
-  Example: "Ask if employed" becomes skip condition "NOT employed" or "employed != 1"
 
 B) exclusive
 ------------
 - MEANING: Exclusive option(s) cannot co-occur with non-exclusive options in same multi-select.
 - PLACEMENT: On the multi-select question itself.
+- ONLY for multi_select questions. Single-select is inherently exclusive - no logic needed.
 - APPLIES TO: Multi-select questions with "None of the above", "Don't know", "Refuse", etc.
 - source_vars: FULL option set for that question (all multi-select vars)
 - target_vars: ONLY the exclusive anchor var(s) - typically *_97, *_98, *_99 or similar
@@ -186,7 +188,7 @@ D) sum
 - MEANING: Sum/add-up constraints (values must total to a specific amount).
 - PLACEMENT: On the question with the constraint.
 - source_vars: Variables in the sum (+ total var if explicitly referenced)
-- target_vars: Current question's vars
+- target_vars: Same as source_vars (the variables being summed)
 - DETECTION: "must add up to", "total must equal", "sum to 100%", "allocate 100 points"
 
 E) piping
@@ -195,9 +197,8 @@ E) piping
 - PLACEMENT: On the DOWNSTREAM filtered question (not the source question).
 - source_vars: UPSTREAM selector variable(s) that control the filtering
 - target_vars: DOWNSTREAM answer option vars that get filtered
-- PIPING IS ANSWER-LEVEL ONLY: No text piping, only answer option filtering.
-- DETECTION: "show only brands selected in Q3", "carry forward", "based on selections",
-  "show items rated X or higher", "exclude items not selected"
+- PIPING IS ANSWER-OPTION FILTERING ONLY. Text piping (inserting values into question wording) is NOT logic.
+- DETECTION: "show only items selected in <source>", "carry forward", "based on selections"
 - NOTE: In most funnels, source_vars and target_vars are same-size aligned lists (1:1).
   Non-1:1 allowed if condition is still boolean and valid.
 
@@ -232,7 +233,7 @@ have ALREADY been applied during data collection. Therefore:
 - COMPLETELY IGNORE any instruction containing "terminate", "screen out", "end survey"
 
 These conditions do NOT need skip logic because the dataset is already filtered.
-Only expand ACTUAL routing between questions/sections (skip to Q5, skip to Section B, etc.)
+Only expand ACTUAL routing between questions/sections.
 
 =============================================================================
 COMPLEX/SECTION-LEVEL LOGIC: CHECK RECODES FIRST
@@ -254,6 +255,13 @@ IF UNCERTAIN → Use compound raw variables (don't guess at recodes)
 IMPORTANT: Only use a recode if the match is CLEAR. When in doubt, use raw 
 question variables rather than guessing.
 
+If ONE instruction mentions multiple conditions together, create ONE rule with compound condition.
+
+For section gates and repeated conditions, INVESTIGATE before deciding source_vars:
+1. Check derived_variables.json for any recode that matches the concept
+2. Verify the source is complete (not missing any part of the condition)
+3. Document your reasoning in condition field
+
 =============================================================================
 ROUTING EXPANSION (CANONICAL - MANDATORY)
 =============================================================================
@@ -267,7 +275,7 @@ never on the source question that triggers the skip.
 -----------------------------------------------------------------------------
 1) SKIP TO QUESTION X
 -----------------------------------------------------------------------------
-Trigger phrases: "skip to Q5", "go to Q10", "jump to Q8", "continue at Q12"
+Trigger phrases: "skip to <Q>", "go to <Q>", "jump to <Q>", "continue at <Q>"
 
 WHAT IT MEANS: Jump forward to question X, skipping all questions in between.
 
@@ -326,7 +334,7 @@ EXAMPLE:
 -----------------------------------------------------------------------------
 4) SECTION ELIGIBILITY GATE (Ask section if...)
 -----------------------------------------------------------------------------
-Trigger phrases: "Section B: Ask if employed", "Ask Section C only if age >= 18"
+Trigger phrases: "Section X: Ask if <condition>", "Ask Section Y only if <condition>"
 
 WHAT IT MEANS: The ENTIRE section is conditional. Invert to skip condition.
 
@@ -346,7 +354,7 @@ EXAMPLE:
 -----------------------------------------------------------------------------
 5) ASK QUESTION IF (Single question condition)
 -----------------------------------------------------------------------------
-Trigger phrases: "Ask Q5 if...", "Q5: Show if...", "Display Q5 only if..."
+Trigger phrases: "Ask <Q> if...", "<Q>: Show if...", "Display <Q> only if..."
 
 WHAT IT MEANS: Single question is conditional. Invert to skip condition.
 
@@ -354,11 +362,7 @@ HOW TO EXPAND:
 - INVERT the ask-if condition into a skip condition
 - Add skip logic to that ONE question only
 
-EXAMPLE:
-  Instruction: "Ask Q5 if purchased any product"
-  
-  Inverted: Skip Q5 if NOT purchased any product
-  Result: Q5 gets: {{"type": "skip", "condition": {{"var": "PURCHASED", "op": "eq", "value": 0}}, ...}}
+Invert the ask-if condition into a skip condition and apply to that question.
 
 -----------------------------------------------------------------------------
 6) GO TO END / TERMINATE (Screen-out routing) - **IGNORE COMPLETELY**
@@ -373,10 +377,7 @@ HOW TO HANDLE:
 - DO NOT create any skip logic from terminate conditions
 - Move on to the next logic instruction
 
-EXAMPLE:
-  Instruction: "If age < 18, terminate survey"
-  
-  Result: IGNORE - do not create any skip logic from this
+Result: IGNORE - do not create any skip logic from terminate conditions.
   
 =============================================================================
 ROUTING EXPANSION VALIDATION
@@ -388,7 +389,8 @@ After expansion, verify:
 - For each skip logic, target_vars matches the question's own vars
 - Skip-to-question: count of skip entries = count of intermediate questions
 - Skip-to-section: all questions between source and section start have skip
-- Section gates: ALL questions in the gated section have skip logic
+- Section gates: COUNT questions in section, COUNT questions with section_skip - MUST MATCH
+- If section gate count doesn't match, you missed questions - fix it
 - Terminate/screenout conditions: IGNORED (no skip logic created)
 
 =============================================================================
@@ -396,11 +398,7 @@ CRITICAL: USE DATA VARIABLE NAMES (NOT QUESTION IDs)
 =============================================================================
 
 ALL logic must reference ACTUAL DATA VARIABLES from the question's "vars" array.
-NEVER use questionnaire IDs (Q1, Q2, A01, B05) in logic - use the mapped variable names.
-
-WRONG (using question IDs):
-  "condition": {{"var": "Q1", "op": "eq", "value": 2}}
-  "source_vars": ["Q1"]
+NEVER use questionnaire IDs in logic - use the mapped variable names from the vars array.
 
 CORRECT (using data variables):
   "condition": {{"var": "<ACTUAL_VAR_NAME>", "op": "eq", "value": 2}}
@@ -497,14 +495,16 @@ CRITICAL RULES (GATE 4 MUST PASS)
 6) NO termination/screenout logic - IGNORE all terminate conditions entirely (dataset is clean)
 7) Preserve question order EXACTLY
 8) Every question MUST have "answers": {{}}
-9) Logic types allowed ONLY: skip, exclusive, count, sum, piping, recode, custom
+9) Logic types allowed ONLY: skip, section_skip, exclusive, count, sum, piping, recode, custom
 10) NEVER bundle multiple questions' vars into one skip rule - each question gets its OWN skip with its OWN vars
 
 =============================================================================
 FINAL STEP - SAVE OUTPUT
 =============================================================================
 
-After adding logic to all questions, SAVE your result to: logic_output.json
+After adding logic to all questions, VERIFY section gates:
+- For each section with a gate, verify all questions in that section have section_skip logic
+- Only then SAVE your result to: logic_output.json
 The file must be a valid JSON ARRAY of all questions with their logics populated.
 '''
 

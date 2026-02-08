@@ -118,9 +118,8 @@ Examples of what to REMOVE:
 - Any "sorry" or "thank you" termination messages
 
 Examples of what to KEEP:
-- "If under 18, skip to end" → Keep condition "under 18", remove "end" destination
-- "Must be employed to continue" → Keep condition "employed"
-- Only extract the eligibility CONDITION, not the termination action
+- Keep only the eligibility CONDITION, not the termination action
+- Remove destination when it's "end" or "terminate"
 
 =============================================================================
 SECTION EXTRACTION
@@ -138,26 +137,26 @@ QUESTION EXTRACTION
 =============================================================================
 
 For each question, extract:
-- id: Question identifier exactly as shown (Q1, Q2, D1, S1, etc.)
+- id: Question identifier exactly as shown in PDF
 - section_id: Which section this question belongs to
 - text: FULL question text including any instructions
 - page: Page number where question appears
 - order: Sequential order in the questionnaire (1, 2, 3...)
 - type: One of these ONLY:
-  * "numeric" - asks for a number (age, count, amount)
+  * "numeric" - asks for a number
   * "single_select" - select ONE option from a list
   * "multi_select" - select ALL that apply (one dimension, list of options)
-  * "grid" - TRUE 2-DIMENSIONAL matrix: rows × columns (e.g., brands × attributes)
-  * "numeric_grid" - 2D grid where cells are numbers (e.g., brands × spend amounts)
+  * "grid" - TRUE 2-DIMENSIONAL matrix: rows × columns with 2+ columns
   * "open_text" - free text response
-- grid_rows: (only for grid/numeric_grid) Row labels in order
-- grid_columns: (only for grid/numeric_grid) Column labels in order
+- grid_rows: (only for grid) Row labels in order
+- grid_columns: (only for grid) Column labels in order
 
 IMPORTANT - GRID vs MULTI_SELECT:
-- "grid" = TWO dimensions required (rows AND columns, e.g., rate 5 brands on 4 attributes)
-- "multi_select" = ONE dimension only (a list of checkboxes, even if many items)
-- If there's only a LIST of items to check/select → multi_select
-- If there's a MATRIX with rows and a scale/columns to rate each row → grid
+- "grid" = TRUE 2D matrix: rows × columns where EACH row is rated/scored on MULTIPLE columns
+- "multi_select" = ONE dimension: a list of items to select, even if displayed in table format
+- Visual table format does NOT mean grid - check if there are multiple columns per row
+- If each row has only ONE value/response → multi_select (not grid)
+- Grid requires: multiple rows AND multiple columns (e.g., brands × attributes, items × scales)
 
 CRITICAL: Preserve EXACT question order as it appears in the PDF.
 This order will be used for routing expansion.
@@ -239,7 +238,7 @@ OUTPUT FORMAT (STRICT JSON)
       "text": "<full question text>",
       "page": <number>,
       "order": <sequential number>,
-      "type": "numeric|single_select|multi_select|grid|numeric_grid|open_text"
+      "type": "numeric|single_select|multi_select|grid|open_text"
     }},
     {{
       "id": "<grid_question_id>",

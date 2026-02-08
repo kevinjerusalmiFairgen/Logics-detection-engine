@@ -171,11 +171,11 @@ STEP 1: ATTACH TO EXISTING STRUCTURE/GROUP
 Check if the variable belongs to an already-mapped question:
 
 A) MISSED MULTI-SELECT OPTION:
-   - Does naming pattern match an existing multi-select? (e.g., Q3_6 when Q3_1-Q3_5 mapped)
+   - Does naming pattern match an existing multi-select?
    - Add to that question's vars array
 
 B) MISSED GRID CELL:
-   - Does naming pattern match an existing grid? (e.g., Q5_r4_c1 when Q5_r1-r3 mapped)
+   - Does naming pattern match an existing grid?
    - Add as new row or complete existing rows
 
 C) OTHER-SPECIFY TEXT FIELD:
@@ -232,34 +232,25 @@ HOW TO DETECT DERIVED VARIABLES:
    - Does the name reference another variable? (e.g., contains a question ID)
    - Does it aggregate multiple vars? (contains "Net", "Total", "Sum")
 
-DERIVED VARIABLE CATEGORIES:
+4) INVESTIGATE SOURCE VARIABLES DEEPLY:
+   - Cross-reference variable label/description with question text in questions_mapped.json
+   - Match variable description to question text and answer options
+   - Check variable names and descriptions for clues about which questions they reference
+   - Verify source_vars logically match the derived variable's purpose
 
-A) RECODES - Transformations of other variables
-   - source_vars: the original variable(s) being recoded
+DERIVED VARIABLE CLASSIFICATION:
 
-B) NETS/AGGREGATIONS - Combined categories
-   - source_vars: the individual vars being combined
+Focus on identifying source_vars accurately. The type/category is less important than getting the source variables correct.
 
-C) WEIGHTS - Survey weights
-   - source_vars: demographic variables used in weighting
+CRITICAL: For recodes that could impact skip logic (quotas, classifications, segmentations):
+   - INVESTIGATE DEEPLY: Match variable description to question text and variable names
+   - Verify source_vars match the actual questions referenced in the description
+   - These recodes may be used as sources for section gates and routing logic
 
-D) FLAGS - Status indicators
-   - source_vars: variables that determine the flag
-
-E) QUOTAS - Quota tracking
-   - source_vars: demographic variables defining quota cells
-
-F) TIMERS - Duration measurements
-   - source_vars: [itself] (system-generated)
-
-G) SYSTEM/METADATA - Platform-generated
-   - source_vars: [itself]
-
-H) QC VARIABLES - Quality control
-   - source_vars: [itself] or related vars
-
-I) ORDER/RANDOMIZATION - Display order tracking
-   - source_vars: [itself]
+For all derived variables:
+   - source_vars: the variable(s) that determine or create this derived variable
+   - If system-generated with no clear sources: source_vars: [itself]
+   - If purpose unclear: source_vars: [itself], description: "Purpose unclear - requires manual review"
 
 STEP 4: LAST RESORT
 -------------------
@@ -270,9 +261,7 @@ If you cannot determine the purpose, still add it as derived:
   "description": "Purpose unclear - requires manual review"
 }}
 
-NEVER leave a variable unresolved. Every unmapped var MUST become either:
-- A new question, OR
-- A derived variable
+Most unmapped variables should be resolved, but internal/system variables with no impact on logic may be classified as derived with source_vars: [itself] if they don't affect skip logic or question routing.
 
 =============================================================================
 OUTPUT FORMAT (STRICT JSON)
@@ -329,9 +318,9 @@ OUTPUT FORMAT (STRICT JSON)
 CRITICAL RULES (GATE 3 MUST PASS)
 =============================================================================
 
-1) EVERY unmapped variable MUST appear in EITHER:
-   - questions_updated[*].vars (attached to a question), OR
-   - derived_variables[*].var (classified as derived)
+1) Every unmapped variable should be resolved, but focus on variables that impact skip logic:
+   - Variables that could be sources for routing → classify as derived with accurate source_vars
+   - Internal/system variables with no logic impact → may be classified as derived with source_vars: [itself]
 
 2) derived_variables[*].source_vars MUST NOT be empty
    - Use [itself] as last resort for system-generated variables
