@@ -132,6 +132,9 @@ Example: If derived_variables has {{"var": "<SEGMENT_VAR>", "source_vars": ["<SR
 And logic says "If <segment_condition>, ask Section C"
 Then condition should reference <SEGMENT_VAR> (the recode), not the source vars.
 
+NOTE: Recode variables CAN be referenced in OTHER logic conditions!
+Example: If <RECODE_VAR> is a recode, skip logic can use "<RECODE_VAR> == 1" as condition.
+
 =============================================================================
 LOGIC DECISION TREE (APPLY IN THIS EXACT ORDER)
 =============================================================================
@@ -160,6 +163,17 @@ A) skip / section_skip
 - source_vars: Gating variable(s) referenced in the condition
 - target_vars: MUST EQUAL current question's vars (this is mandatory!)
 - FOR ASK-IF RULES: Invert the ask-if condition into a skip condition
+
+LOGIC GROUPING (CRITICAL):
+- If ONE instruction groups conditions together (e.g., "skip Q3 if Q1=1 AND Q2=2"), create ONE logic entry:
+  * condition: "Q1 = 1 AND Q2 = 2" (compound)
+  * source_vars: [Q1, Q2] (all sources)
+  * ONE logic object total
+- If instructions are SEPARATE (e.g., "skip Q3 if Q1=1" and separately "skip Q3 if Q2=2"), create SEPARATE logic entries:
+  * Logic 1: condition "Q1 = 1", source_vars: [Q1]
+  * Logic 2: condition "Q2 = 2", source_vars: [Q2]
+  * TWO logic objects total
+- DO NOT ungroup compound conditions - preserve how conditions are grouped in the original instruction
 
 B) exclusive
 ------------
@@ -209,8 +223,7 @@ F) recode
 - source_vars: Input variable(s) used in the derivation
 - target_vars: The derived variable(s) being assigned/used
 - REQUIREMENT: The derived variable MUST exist in derived_variables.json
-- NOTE: Recode variables CAN be referenced in OTHER logic conditions!
-  Example: If <RECODE_VAR> is a recode, skip logic can use "<RECODE_VAR> == 1" as condition.
+- NOTE: See "IMPORTANT: RECODES AND DERIVED VARIABLES" section above for how recodes can be referenced in other logic conditions
 
 G) custom
 ---------
@@ -235,6 +248,12 @@ have ALREADY been applied during data collection. Therefore:
 These conditions do NOT need skip logic because the dataset is already filtered.
 Only expand ACTUAL routing between questions/sections.
 
+HOW TO HANDLE TERMINATE INSTRUCTIONS:
+- SKIP this instruction entirely
+- DO NOT create any skip logic from terminate conditions
+- Move on to the next logic instruction
+- Result: IGNORE - do not create any skip logic from terminate conditions
+
 =============================================================================
 COMPLEX/SECTION-LEVEL LOGIC: CHECK RECODES FIRST
 =============================================================================
@@ -242,20 +261,26 @@ COMPLEX/SECTION-LEVEL LOGIC: CHECK RECODES FIRST
 For complex or repeated logic conditions (especially section-level routing),
 check derived_variables.json for a recode that captures the same classification.
 
+MANDATORY RECODE CHECK FOR SECTION GATES:
+- Before creating compound conditions for section gates:
+  1. Check derived_variables.json for any recode matching the section gate concept
+  2. If recode exists and matches, USE THE RECODE (it simplifies the logic)
+  3. If no recode matches, use compound raw variables
+- This check is MANDATORY, not optional
+- This check must happen BEFORE creating any compound conditions
+
 WHEN TO USE A RECODE:
 - The recode's description clearly matches the condition concept
 - The recode's source_vars include the question(s) referenced in the instruction
-- You are CONFIDENT the recode represents the exact same logic
+- The recode represents the same classification/logic as the section gate
 
-IF CONFIDENT → Use the recode variable in source_vars
+PREFERENCE RULE: If a recode exists and matches the concept, USE IT - recodes simplify 
+complex compound conditions into single variable references. Only use raw compound 
+conditions if no matching recode exists.
 
-IF UNCERTAIN → Use compound raw variables (don't guess at recodes)
-  Use the raw question variables as multiple sources.
+IF RECODE MATCHES → Use the recode variable in source_vars (preferred - simpler)
 
-IMPORTANT: Only use a recode if the match is CLEAR. When in doubt, use raw 
-question variables rather than guessing.
-
-If ONE instruction mentions multiple conditions together, create ONE rule with compound condition.
+IF NO RECODE MATCHES → Use compound raw variables (fallback only)
 
 For section gates and repeated conditions, INVESTIGATE before deciding source_vars:
 1. Check derived_variables.json for any recode that matches the concept
@@ -343,6 +368,13 @@ HOW TO EXPAND:
 - INVERT the eligibility condition into a skip condition
 - Add skip logic to EVERY question in that section
 
+VERIFICATION REQUIREMENT (MANDATORY):
+- After expanding a section gate, verify:
+  * Count: How many questions are in this section?
+  * Count: How many questions have section_skip logic?
+  * If counts don't match, you missed questions - find them and add section_skip logic
+- This verification must happen BEFORE saving output
+
 EXAMPLE:
   Instruction: "Section B: Ask only if <eligibility_condition>"
   Section B contains: QB1, QB2, QB3
@@ -362,8 +394,6 @@ HOW TO EXPAND:
 - INVERT the ask-if condition into a skip condition
 - Add skip logic to that ONE question only
 
-Invert the ask-if condition into a skip condition and apply to that question.
-
 -----------------------------------------------------------------------------
 6) GO TO END / TERMINATE (Screen-out routing) - **IGNORE COMPLETELY**
 -----------------------------------------------------------------------------
@@ -378,6 +408,8 @@ HOW TO HANDLE:
 - Move on to the next logic instruction
 
 Result: IGNORE - do not create any skip logic from terminate conditions.
+
+(Refer to "CRITICAL: IGNORE ALL TERMINATE/SCREENOUT CONDITIONS" section above for full details)
   
 =============================================================================
 ROUTING EXPANSION VALIDATION
@@ -390,7 +422,8 @@ After expansion, verify:
 - Skip-to-question: count of skip entries = count of intermediate questions
 - Skip-to-section: all questions between source and section start have skip
 - Section gates: COUNT questions in section, COUNT questions with section_skip - MUST MATCH
-- If section gate count doesn't match, you missed questions - fix it
+  * If section gate count doesn't match, you missed questions - fix it
+  * This verification is MANDATORY (see section gate expansion above)
 - Terminate/screenout conditions: IGNORED (no skip logic created)
 
 =============================================================================
@@ -502,10 +535,22 @@ CRITICAL RULES (GATE 4 MUST PASS)
 FINAL STEP - SAVE OUTPUT
 =============================================================================
 
-After adding logic to all questions, VERIFY section gates:
-- For each section with a gate, verify all questions in that section have section_skip logic
-- Only then SAVE your result to: logic_output.json
-The file must be a valid JSON ARRAY of all questions with their logics populated.
+After adding logic to all questions, perform final verification:
+
+1. VERIFY SECTION GATES:
+   - For each section with a gate, verify all questions in that section have section_skip logic
+   - Count questions in section vs. questions with section_skip logic - MUST MATCH
+   - If any section gate is incomplete, fix it before saving
+
+2. VERIFY ROUTING EXPANSION:
+   - All routing instructions (except terminates) have been expanded
+   - Skip logic is on skipped questions, not source questions
+   - Target_vars match each question's own vars
+
+3. SAVE OUTPUT:
+   - Only save after all section gates are verified complete
+   - SAVE your result to: logic_output.json
+   - The file must be a valid JSON ARRAY of all questions with their logics populated
 '''
 
 

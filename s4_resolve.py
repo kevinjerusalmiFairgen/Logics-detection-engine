@@ -145,8 +145,8 @@ The file MUST have this EXACT structure:
   "derived_variables": [
     {{
       "var": "<WEIGHT_VAR>",
-      "source_vars": ["<DEMO_VAR1>", "<DEMO_VAR2>", "<DEMO_VAR3>"],
-      "description": "Survey weight for demographic balancing"
+      "source_vars": ["<VAR1>", "<VAR2>", "<VAR3>"],
+      "description": "Survey weight for sample balancing"
     }}
   ],
   "questions_updated": [
@@ -232,25 +232,48 @@ HOW TO DETECT DERIVED VARIABLES:
    - Does the name reference another variable? (e.g., contains a question ID)
    - Does it aggregate multiple vars? (contains "Net", "Total", "Sum")
 
-4) INVESTIGATE SOURCE VARIABLES DEEPLY:
-   - Cross-reference variable label/description with question text in questions_mapped.json
-   - Match variable description to question text and answer options
-   - Check variable names and descriptions for clues about which questions they reference
-   - Verify source_vars logically match the derived variable's purpose
-
 DERIVED VARIABLE CLASSIFICATION:
 
 Focus on identifying source_vars accurately. The type/category is less important than getting the source variables correct.
-
-CRITICAL: For recodes that could impact skip logic (quotas, classifications, segmentations):
-   - INVESTIGATE DEEPLY: Match variable description to question text and variable names
-   - Verify source_vars match the actual questions referenced in the description
-   - These recodes may be used as sources for section gates and routing logic
 
 For all derived variables:
    - source_vars: the variable(s) that determine or create this derived variable
    - If system-generated with no clear sources: source_vars: [itself]
    - If purpose unclear: source_vars: [itself], description: "Purpose unclear - requires manual review"
+
+=============================================================================
+CRITICAL: INVESTIGATION FOR RECODES THAT IMPACT LOGIC
+=============================================================================
+
+For recodes that could impact skip logic (quotas, classifications, segmentations):
+These recodes may be used as sources for section gates and routing logic.
+
+INVESTIGATION PROCESS (MANDATORY BEFORE ASSIGNING source_vars):
+
+1. READ THE VARIABLE DESCRIPTION CAREFULLY:
+   - Understand what the recode represents
+   - Identify what classification or grouping it creates
+
+2. CROSS-REFERENCE WITH QUESTIONS:
+   - Cross-reference variable label/description with question text in questions_mapped.json
+   - Match variable description to question text and answer options
+   - Check variable names and descriptions for clues about which questions they reference
+   - Search questions_mapped.json for question text that matches the description
+
+3. IDENTIFY SOURCE QUESTIONS:
+   - Identify which questions are referenced in the description
+   - If description mentions section gates or routing, check those questions
+   - Verify source_vars logically match the derived variable's purpose
+
+4. VERIFY SOURCE_VARS:
+   - Verify source_vars match the actual questions referenced in the description
+   - Verify source_vars match those questions
+   - This verification must happen BEFORE assigning source_vars
+
+CRITICAL: For recodes that could be sources for skip logic:
+   - INVESTIGATE DEEPLY: Match variable description to question text and variable names
+   - Verify source_vars match the actual questions referenced in the description
+   - Don't assign source_vars without verifying they match the variable's purpose
 
 STEP 4: LAST RESORT
 -------------------
@@ -276,8 +299,8 @@ OUTPUT FORMAT (STRICT JSON)
     }},
     {{
       "var": "<WEIGHT_VAR>",
-      "source_vars": ["<DEMO1>", "<DEMO2>", "<DEMO3>"],
-      "description": "Survey weight for demographic balancing"
+      "source_vars": ["<VAR1>", "<VAR2>", "<VAR3>"],
+      "description": "Survey weight for sample balancing"
     }},
     {{
       "var": "<FLAG_VAR>",
@@ -334,12 +357,8 @@ CRITICAL RULES (GATE 3 MUST PASS)
 
 6) Do NOT invent variable names - only use names from unmapped_vars.json
 
-=============================================================================
-FINAL STEP - SAVE OUTPUT
-=============================================================================
-
-After resolving all variables, SAVE your result to: resolution_output.json
-The file must contain valid JSON with "derived_variables" and "questions_updated" arrays.
+7) For recodes that could impact skip logic: verify source_vars match the description
+   - Don't assign source_vars without verifying they match the variable's purpose
 
 =============================================================================
 VALIDATION BEFORE SAVING (MANDATORY)
@@ -355,6 +374,13 @@ If the counts don't match, you have lost variables. Review each unmapped var
 and ensure it's either attached to a question or in derived_variables.
 
 EVERY SINGLE unmapped variable must be accounted for - no exceptions.
+
+=============================================================================
+FINAL STEP - SAVE OUTPUT
+=============================================================================
+
+After validation passes, SAVE your result to: resolution_output.json
+The file must contain valid JSON with "derived_variables" and "questions_updated" arrays.
 '''
 
 

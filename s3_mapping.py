@@ -161,12 +161,30 @@ A) VARIABLE NAMING PATTERNS:
    - Row/column patterns for grids (<VAR>_r1_c1, <VAR>_r1_c2, <VAR>_r2_c1)
    - Terminal codes: _97, _98, _99 often indicate exclusive anchors (None/DK/RF)
    
-   PATTERN-BASED GROUPING:
+   PATTERN-BASED GROUPING AND DISCOVERY:
    - When you identify a naming pattern, use it as a search query to find ALL variables matching that pattern
    - Patterns define groups: variables sharing a pattern likely belong together
    - To create new groups: Search dataset_inventory for all variables matching an identified pattern
    - To fill existing groups: After mapping some variables, search for additional variables matching the same pattern
    - Verify completeness: Compare found variables against all variables matching the pattern in dataset_inventory
+   
+   PROACTIVE PATTERN DISCOVERY (After initial mapping):
+   - Scan dataset_inventory for common multi-select patterns:
+     * Sequential suffixes: _r1, _r2, _r3 or _1, _2, _3 patterns
+     * Shared prefixes with numeric suffixes indicating options
+   - For each pattern found, check if variables are already mapped
+   - If unmapped variables form a clear pattern group, investigate if they represent a question:
+     * Check variable labels for common question text
+     * Check if they form a logical multi-select group
+     * If yes, create a new question mapping for this group
+   - This helps discover questions that may not be clearly represented in the PDF structure
+   
+   PATTERN VERIFICATION (After mapping each question):
+   - Extract the pattern from mapped variables
+   - Search dataset_inventory for ALL variables matching that pattern
+   - Compare: found variables vs. all matching variables in dataset_inventory
+   - If missing variables found, add them to the question's vars array
+   - This verification must happen BEFORE finalizing the mapping
 
 B) VARIABLE LABELS:
    - Label text matches or closely resembles question text
@@ -204,7 +222,7 @@ HOW TO DETECT FROM DATA:
    - OR: <VAR>_<Row1>_<Col1>, <VAR>_<Row1>_<Col2>, <VAR>_<Row2>_<Col1>
    - Must have TWO dimensions evident in naming
    - vars = [[row1_vars], [row2_vars], ...] (list of lists)
-   - Each inner list = one row (one item rated on all attributes)
+   - Each inner list = one row (one item evaluated across all columns)
 
 CRITICAL - TYPE OVERRIDE RULES:
 - DATA STRUCTURE WINS over PDF description
@@ -249,10 +267,10 @@ IMPORTANT: MAPPING ENABLES LOGIC
 The "vars" array you create for each question is CRITICAL for downstream logic.
 After this step, ALL logic will reference DATA VARIABLES (not question IDs).
 
-Example: If QA asks a demographic question and maps to variable "<DEMO_VAR>":
+Example: If QA asks a question and maps to variable "<VAR_A>":
 - Question ID: "QA" (from PDF)
-- vars: ["<DEMO_VAR>"] (from data)
-- Later logic will say: "if <DEMO_VAR> == 1" NOT "if QA == 1"
+- vars: ["<VAR_A>"] (from data)
+- Later logic will say: "if <VAR_A> == 1" NOT "if QA == 1"
 
 So accurate mapping is essential - every question needs correct vars from the data.
 
@@ -275,18 +293,36 @@ If you can't confidently map a variable to a question, PUT IT IN unmapped_vars.
 The next step will classify these as derived variables, system vars, etc.
 
 =============================================================================
+VERIFICATION AND PATTERN DISCOVERY PASS
+=============================================================================
+
+After initial mapping from PDF structure, perform these steps:
+
+1. PATTERN DISCOVERY:
+   - Scan dataset_inventory for common multi-select patterns:
+     * Variables with sequential suffixes (_r1, _r2, _r3 or _1, _2, _3)
+     * Variables sharing prefixes with numeric option suffixes
+   - For each pattern cluster found:
+     * Check if variables are already mapped to a question
+     * If unmapped, investigate variable labels for common question text
+     * If labels suggest a coherent question, create a new question mapping
+   - This helps discover questions that may not be clearly represented in PDF structure
+
+2. COMPREHENSIVE VERIFICATION (BEFORE SAVING):
+   - Count all vars in questions_mapped
+   - Count unmapped_vars
+   - Sum must equal total vars in dataset_inventory
+   - If not equal, find the missing vars and add to unmapped_vars
+   - For each multi-select question: verify you found ALL variables matching its pattern
+   - If pattern suggests sequential numbering, verify no gaps were missed
+   - Only save after verification is complete
+
+=============================================================================
 FINAL STEP - SAVE OUTPUT
 =============================================================================
 
-After mapping all questions, SAVE your result to: mapping_output.json
+After mapping all questions, pattern discovery, and verification, SAVE your result to: mapping_output.json
 The file must contain valid JSON with "questions_mapped" and "unmapped_vars" arrays.
-
-BEFORE SAVING, VERIFY:
-- Count all vars in questions_mapped
-- Count unmapped_vars
-- Sum must equal total vars in dataset_inventory
-- If not equal, find the missing vars and add to unmapped_vars
-- For multi-select questions: Search dataset_inventory for all variables matching the pattern to ensure completeness
 '''
 
 

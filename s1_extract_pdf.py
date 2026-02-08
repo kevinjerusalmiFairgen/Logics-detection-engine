@@ -156,7 +156,7 @@ IMPORTANT - GRID vs MULTI_SELECT:
 - "multi_select" = ONE dimension: a list of items to select, even if displayed in table format
 - Visual table format does NOT mean grid - check if there are multiple columns per row
 - If each row has only ONE value/response → multi_select (not grid)
-- Grid requires: multiple rows AND multiple columns (e.g., brands × attributes, items × scales)
+- Grid requires: multiple rows AND multiple columns (e.g., items × dimensions, rows × columns)
 
 CRITICAL: Preserve EXACT question order as it appears in the PDF.
 This order will be used for routing expansion.
