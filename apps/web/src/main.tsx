@@ -52,7 +52,7 @@ function fileStem(filename: string) {
 }
 
 const ARTIFACT_DOWNLOAD_NAMES: Record<string, string> = {
-  questionnaire_final: "07_questionnaire_final.json",
+  questionnaire_final: "questionnaire.json",
   structure_json: "structure.json",
   fairset_report: "fairset_report.json",
   logics_json: "logics.json",
@@ -88,10 +88,12 @@ function parseContentDispositionFilename(header: string | null): string | null {
 function FileInput({
   label,
   accept,
+  hint,
   onChange,
 }: {
   label: string;
   accept: string;
+  hint?: string;
   onChange: (file: File | null) => void;
 }) {
   const [filename, setFilename] = useState("");
@@ -99,6 +101,7 @@ function FileInput({
   return (
     <label className="field">
       <span>{label}</span>
+      {hint ? <span className="optionalHint">{hint}</span> : null}
       <span className="filePicker">
         <input
           type="file"
@@ -165,13 +168,22 @@ function App() {
   const [qnrFile, setQnrFile] = useState<File | null>(null);
   const [dataFile, setDataFile] = useState<File | null>(null);
   const [questionnaireJsonFile, setQuestionnaireJsonFile] = useState<File | null>(null);
-  const [fairsetFile, setFairsetFile] = useState<File | null>(null);
+  const [newFairsetOptional, setNewFairsetOptional] = useState<File | null>(null);
+  const [fairsetForReview, setFairsetForReview] = useState<File | null>(null);
   const [projectNameInput, setProjectNameInput] = useState("");
   const [renameInput, setRenameInput] = useState("");
   const [workspaceMode, setWorkspaceMode] = useState<"new" | "project">("new");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const pollTimer = useRef<number | null>(null);
+  const pendingFairsetRef = useRef<File | null>(null);
+  const autoDownloadPackRef = useRef(false);
+
+  function sleep(ms: number) {
+    return new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
 
   useEffect(() => {
     void loadProjects();
@@ -248,10 +260,11 @@ function App() {
 
   function projectListHint(project: Project) {
     const a = project.artifacts ?? {};
-    if (a.structure_json) return "structure";
-    if (a.logics_json) return "logics";
-    if (Object.keys(a).length > 0) return "artifacts";
-    return "in progress…";
+    if (a.fairset_report) return "reviewed";
+    if (a.structure_json) return "ready";
+    if (a.logics_json) return "extracting…";
+    if (Object.keys(a).length > 0) return "…";
+    return "starting…";
   }
 
   async function openProject(runId: string) {
@@ -285,6 +298,88 @@ function App() {
     }
   }
 
+  async function finalizeLogicsPipeline(runId: string) {
+    const queuedFairset = pendingFairsetRef.current;
+    pendingFairsetRef.current = null;
+    const shouldDownloadPack = autoDownloadPackRef.current && !queuedFairset;
+    autoDownloadPackRef.current = false;
+
+    try {
+      setError("");
+      let runRes = await fetch(`${API_BASE}/runs/${runId}`);
+      if (!runRes.ok) {
+        throw new Error("Could not load run after pipeline.");
+      }
+      let proj = (await runRes.json()) as ApiResult;
+      let arts = proj.artifacts ?? {};
+
+      if (!arts.logics_json) {
+        throw new Error("Pipeline finished but logics.json is missing.");
+      }
+
+      if (!arts.structure_json) {
+        setBusy("Structure…");
+        const sRes = await fetch(`${API_BASE}/runs/${runId}/fairset-structure`, { method: "POST" });
+        if (!sRes.ok) {
+          const detail = (await sRes.json().catch(() => ({}))) as { detail?: string };
+          throw new Error(detail.detail ?? "Could not build structure.json.");
+        }
+        runRes = await fetch(`${API_BASE}/runs/${runId}`);
+        proj = (await runRes.json()) as ApiResult;
+        arts = proj.artifacts ?? {};
+      }
+
+      await openProject(runId);
+      await loadProjects();
+
+      if (queuedFairset) {
+        setBusy("Fairset…");
+        const fd = new FormData();
+        fd.append("fairset_file", queuedFairset);
+        const rv = await fetch(`${API_BASE}/runs/${runId}/fairset-review`, { method: "POST", body: fd });
+        const reviewBody = (await rv.json()) as ApiResult;
+        if (!rv.ok) {
+          throw new Error(
+            reviewBody.message ?? reviewBody.missing_columns?.join(", ") ?? "Fairset review failed.",
+          );
+        }
+        const refreshed = await fetch(`${API_BASE}/runs/${runId}`);
+        const refreshedProject = refreshed.ok ? ((await refreshed.json()) as ApiResult) : proj;
+        setSelectedProject({
+          ...reviewBody,
+          artifacts: refreshedProject.artifacts ?? {},
+          progress: refreshedProject.progress,
+        });
+        setNewFairsetOptional(null);
+      } else if (shouldDownloadPack) {
+        setBusy("Downloads…");
+        if (arts.questionnaire_final) {
+          await downloadRunArtifact(
+            { run_id: runId, artifacts: arts, metadata: proj.metadata },
+            "questionnaire_final",
+          );
+          await sleep(600);
+        }
+        runRes = await fetch(`${API_BASE}/runs/${runId}`);
+        proj = (await runRes.json()) as ApiResult;
+        arts = proj.artifacts ?? {};
+        if (arts.structure_json) {
+          await downloadRunArtifact(
+            { run_id: runId, artifacts: arts, metadata: proj.metadata },
+            "structure_json",
+          );
+        }
+      }
+
+      await loadProjects();
+      await openProject(runId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not finish outputs.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   function startPolling(runId: string) {
     stopPolling();
     async function tick() {
@@ -297,8 +392,15 @@ function App() {
       if (nextProgress.status === "complete" || nextProgress.status === "failed") {
         stopPolling();
         setBusy("");
+        if (nextProgress.status === "failed") {
+          pendingFairsetRef.current = null;
+          autoDownloadPackRef.current = false;
+        }
         await openProject(runId);
         await loadProjects();
+        if (nextProgress.status === "complete") {
+          await finalizeLogicsPipeline(runId);
+        }
       }
     }
     void tick();
@@ -310,7 +412,9 @@ function App() {
       setError("Upload a questionnaire PDF and a data file first.");
       return;
     }
-    setBusy("Creating project");
+    pendingFairsetRef.current = newFairsetOptional;
+    autoDownloadPackRef.current = !newFairsetOptional;
+    setBusy("Starting…");
     setProgress({ run_id: "", status: "created", percent: 5, message: "Starting extraction..." });
     setError("");
     const formData = new FormData();
@@ -337,6 +441,8 @@ function App() {
       startPolling(body.run_id);
     } catch (caught) {
       setBusy("");
+      pendingFairsetRef.current = null;
+      autoDownloadPackRef.current = false;
       setError(caught instanceof Error ? caught.message : "Could not start extraction.");
     }
   }
@@ -439,15 +545,15 @@ function App() {
     if (!selectedProject) {
       return;
     }
-    if (!fairsetFile) {
-      setError("Upload a Fairset file first.");
+    if (!fairsetForReview) {
+      setError("Pick a Fairset file.");
       return;
     }
-    setBusy("Checking Fairset");
+    setBusy("Fairset review");
     setProgress(null);
     setError("");
     const formData = new FormData();
-    formData.append("fairset_file", fairsetFile);
+    formData.append("fairset_file", fairsetForReview);
     try {
       const response = await fetch(`${API_BASE}/runs/${selectedProject.run_id}/fairset-review`, {
         method: "POST",
@@ -461,6 +567,7 @@ function App() {
       const refreshedProject = refreshed.ok ? ((await refreshed.json()) as ApiResult) : selectedProject;
       const arts = refreshedProject.artifacts ?? {};
       setSelectedProject({ ...body, artifacts: arts, progress: refreshedProject.progress });
+      setFairsetForReview(null);
       await loadProjects();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Fairset review failed.");
@@ -476,10 +583,8 @@ function App() {
   return (
     <main>
       <header className="topbar">
-        <div>
-          <h1>Logic projects</h1>
-        </div>
-        <button className="secondary compact" onClick={() => void loadProjects()}>
+        <h1>Logic</h1>
+        <button type="button" className="secondary compact" onClick={() => void loadProjects()}>
           Refresh
         </button>
       </header>
@@ -492,7 +597,7 @@ function App() {
             <div className="panelHeader">
               <h2>Projects</h2>
               <button className="textButton" onClick={() => setWorkspaceMode("new")}>
-                New project
+                New
               </button>
             </div>
             <div className="projectList">
@@ -510,10 +615,7 @@ function App() {
                     }}
                   >
                     <strong>{projectName(project)}</strong>
-                    <span>
-                      {projectListHint(project)}
-                      {(project.artifacts ?? {}).fairset_report ? " · reviewed" : ""}
-                    </span>
+                    <span>{projectListHint(project)}</span>
                   </button>
                 ))
               )}
@@ -524,35 +626,48 @@ function App() {
         <section className="workspace">
           {workspaceMode === "new" ? (
             <section className="menuBlock">
+              <p className="workspaceLead">PDF questionnaire and data required. Fairset optional.</p>
               <label className="titleField">
-                <span>Project name</span>
+                <span>Name</span>
                 <input
                   type="text"
                   value={projectNameInput}
-                  placeholder="Untitled project"
+                  placeholder="Untitled"
                   onChange={(event) => setProjectNameInput(event.target.value)}
                 />
               </label>
-              <div className="uploadGrid">
-              <FileInput label="Questionnaire PDF" accept=".pdf" onChange={setQnrFile} />
-              <FileInput
-                label="Data (.sav, .csv, .xlsx)"
-                accept=".sav,.csv,.xlsx,.xls"
-                onChange={(file) => {
-                  setDataFile(file);
-                  if (file) {
-                    setProjectNameInput(fileStem(file.name));
-                  }
-                }}
-              />
-              </div>
-              <button className="primary" disabled={Boolean(busy)} onClick={() => void createProject()}>
-                {busy === "Creating project" ? "Running..." : "Generate"}
-              </button>
-              <div className="optionDivider">or</div>
-              <div className="singleUpload">
+              <div className="workflowFields">
+                <FileInput label="Questionnaire (PDF)" accept=".pdf" onChange={setQnrFile} />
                 <FileInput
-                  label="Questionnaire JSON"
+                  label="Data"
+                  accept=".sav,.csv,.xlsx,.xls"
+                  hint="Sav · CSV · Excel"
+                  onChange={(file) => {
+                    setDataFile(file);
+                    if (file) {
+                      setProjectNameInput(fileStem(file.name));
+                    }
+                  }}
+                />
+                <FileInput
+                  label="Fairset"
+                  accept=".sav,.csv,.xlsx,.xls"
+                  hint="Optional · review in the same run"
+                  onChange={setNewFairsetOptional}
+                />
+              </div>
+              <button
+                type="button"
+                className="primary"
+                disabled={Boolean(busy) || !qnrFile || !dataFile}
+                onClick={() => void createProject()}
+              >
+                {busy === "Starting…" ? "…" : "Start"}
+              </button>
+              <details className="minorDetails">
+                <summary>Questionnaire JSON only</summary>
+                <FileInput
+                  label="JSON"
                   accept=".json"
                   onChange={(file) => {
                     setQuestionnaireJsonFile(file);
@@ -561,10 +676,15 @@ function App() {
                     }
                   }}
                 />
-                <button className="secondary" disabled={Boolean(busy)} onClick={() => void createStructureProject()}>
-                  {busy === "Generating structure from questionnaire" ? "Generating..." : "Generate structure only"}
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={Boolean(busy)}
+                  onClick={() => void createStructureProject()}
+                >
+                  {busy === "Generating structure from questionnaire" ? "…" : "Structure only"}
                 </button>
-              </div>
+              </details>
               <ProgressStatus busy={busy} progress={progress} />
             </section>
           ) : (
@@ -596,50 +716,67 @@ function App() {
 
                   <ProgressStatus busy={busy} progress={progress} />
 
-                  <div className="actionsGrid">
-                    {canDownloadQuestionnaire && selectedProject && (
+                  <div className="outputStrip inlineLabel">
+                    <span>Files</span>
+                    {canDownloadQuestionnaire && selectedProject ? (
                       <button
                         type="button"
-                        className="secondary"
+                        className="secondary compact"
                         disabled={Boolean(busy)}
                         onClick={() => void downloadRunArtifact(selectedProject, "questionnaire_final")}
                       >
-                        Questionnaire JSON
+                        questionnaire.json
                       </button>
-                    )}
+                    ) : null}
                     {canDownloadStructure && selectedProject ? (
                       <button
                         type="button"
-                        className="secondary"
+                        className="secondary compact"
                         disabled={Boolean(busy)}
                         onClick={() => void downloadRunArtifact(selectedProject, "structure_json")}
                       >
                         structure.json
                       </button>
-                    ) : (
-                      <button className="secondary" disabled={Boolean(busy)} onClick={() => void generateStructure()}>
-                        {busy === "Generating structure.json" ? "Generating..." : "Generate structure"}
-                      </button>
-                    )}
-                    {canDownloadReport && selectedProject && (
+                    ) : selectedProject?.artifacts?.logics_json ? (
                       <button
                         type="button"
-                        className="secondary"
+                        className="secondary compact"
+                        disabled={Boolean(busy)}
+                        onClick={() => void generateStructure()}
+                      >
+                        {busy === "Generating structure.json" ? "…" : "structure.json"}
+                      </button>
+                    ) : null}
+                    {canDownloadReport && selectedProject ? (
+                      <button
+                        type="button"
+                        className="secondary compact"
                         disabled={Boolean(busy)}
                         onClick={() => void downloadRunArtifact(selectedProject, "fairset_report")}
                       >
-                        Fairset report
+                        report
                       </button>
-                    )}
+                    ) : null}
                   </div>
 
-                  <section className="reviewPanel">
-                    <h3>Fairset review</h3>
-                    <FileInput label="Fairset (.sav, .csv, .xlsx)" accept=".sav,.csv,.xlsx,.xls" onChange={setFairsetFile} />
-                    <button className="primary" disabled={Boolean(busy)} onClick={() => void reviewFairset()}>
-                      {busy === "Checking Fairset" ? "Checking..." : "Check"}
-                    </button>
-                  </section>
+                  {!canDownloadReport ? (
+                    <div className="splitSection">
+                      <FileInput
+                        label="Fairset"
+                        accept=".sav,.csv,.xlsx,.xls"
+                        hint="Add anytime · same project"
+                        onChange={setFairsetForReview}
+                      />
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={Boolean(busy) || !fairsetForReview || !selectedProject?.artifacts?.logics_json}
+                        onClick={() => void reviewFairset()}
+                      >
+                        {busy === "Fairset review" ? "…" : "Run Fairset review"}
+                      </button>
+                    </div>
+                  ) : null}
 
                   {selectedProject.missing_columns?.length ? (
                     <div className="warning">Missing columns: {selectedProject.missing_columns.join(", ")}</div>

@@ -86,6 +86,78 @@ h3 {
   max-width: 620px;
 }
 
+.subtitle.single {
+  margin-top: 0;
+}
+
+.workspaceLead {
+  color: #6e6e73;
+  font-size: 13px;
+  line-height: 1.45;
+  margin-bottom: 18px;
+}
+
+.workflowFields {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.optionalHint {
+  color: #86868b;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.minorDetails {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  margin-top: 22px;
+  padding-top: 16px;
+}
+
+.minorDetails summary {
+  color: #6e6e73;
+  cursor: pointer;
+  font-size: 12px;
+  list-style-position: outside;
+}
+
+.minorDetails summary::-webkit-details-marker {
+  color: #86868b;
+}
+
+.minorDetails .field:first-of-type {
+  margin-top: 12px;
+}
+
+.outputStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.outputStrip.inlineLabel {
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.outputStrip.inlineLabel span {
+  color: #6e6e73;
+  font-size: 12px;
+}
+
+.compactDanger {
+  color: #6e6e73;
+}
+
+.splitSection {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  margin-top: 22px;
+  padding-top: 18px;
+}
+
 .layout {
   display: grid;
   gap: 16px;
