@@ -15,21 +15,75 @@ import os
 import argparse
 from typing import Dict, List
 
-from utils import ManusAPIClient, extract_json_from_task
+from logic_platform.utils import ManusAPIClient, extract_json_from_task
+from logic_platform.opus_utils import call_opus_json, estimate_opus_cost
 
 
 def map_questions_to_variables(
     dataset_inventory: List[Dict],
     questionnaire_structure: Dict,
-    show_progress: bool = True
-) -> Dict:
+    show_progress: bool = True,
+    engine: str = "manus",
+) -> tuple:
     """
-    Use Manus to map questions to dataset variables.
-    Uploads data as files instead of embedding in prompt.
+    Map questions to dataset variables.
+    
+    Args:
+        engine: "manus" or "opus"
     
     Returns:
-        Dict with: questions_mapped, unmapped_vars
+        (result_dict, cost_info) - cost_info is {"credits": N} or {"input_tokens": N, "output_tokens": N}
     """
+    if engine == "opus":
+        return _map_with_opus(dataset_inventory, questionnaire_structure, show_progress)
+    return _map_with_manus(dataset_inventory, questionnaire_structure, show_progress)
+
+
+def _map_with_opus(
+    dataset_inventory: List[Dict],
+    questionnaire_structure: Dict,
+    show_progress: bool,
+) -> tuple:
+    """Use Claude Opus 4.6 on Vertex AI."""
+    prompt = _build_mapping_prompt(len(dataset_inventory), len(questionnaire_structure.get("questions", [])))
+    # Opus variant: respond with JSON, not save to file
+    prompt = prompt.replace("INPUT FILES (ATTACHED)", "INPUT DATA (provided below as JSON)")
+    prompt = prompt.replace(
+        "You MUST save your output to a file named: mapping_output.json\n\nThe file MUST have this EXACT structure:",
+        "Respond with ONLY a valid JSON object. No markdown, no code blocks, no explanation. Use this EXACT structure:"
+    )
+    prompt = prompt.replace(
+        "After mapping all questions, pattern discovery, and verification, SAVE your result to: mapping_output.json\nThe file must contain valid JSON with \"questions_mapped\" and \"unmapped_vars\" arrays.",
+        "After mapping all questions, pattern discovery, and verification, respond with the JSON object containing \"questions_mapped\" and \"unmapped_vars\" arrays."
+    )
+    result, usage = call_opus_json(
+        prompt,
+        {
+            "dataset_inventory.json": dataset_inventory,
+            "questionnaire.json": questionnaire_structure,
+        },
+        show_progress=show_progress,
+    )
+    if isinstance(result, list):
+        result = {"questions_mapped": result, "unmapped_vars": []}
+    elif isinstance(result, dict):
+        questions = result.get("questions_mapped") or result.get("questions") or result.get("mapped_questions") or []
+        unmapped = result.get("unmapped_vars") or result.get("unmapped_variables") or result.get("unmapped") or []
+        result = {"questions_mapped": questions, "unmapped_vars": unmapped}
+    if show_progress:
+        print(f"  Mapping complete:")
+        print(f"    - Questions mapped: {len(result.get('questions_mapped', []))}")
+        print(f"    - Unmapped vars: {len(result.get('unmapped_vars', []))}")
+        print(f"    - Tokens: {usage['input_tokens']} in, {usage['output_tokens']} out (~${estimate_opus_cost(usage['input_tokens'], usage['output_tokens']):.4f})")
+    return result, usage
+
+
+def _map_with_manus(
+    dataset_inventory: List[Dict],
+    questionnaire_structure: Dict,
+    show_progress: bool,
+) -> tuple:
+    """Use Manus to map questions to dataset variables."""
     client = ManusAPIClient()
     
     # Upload with explicit file names
@@ -64,7 +118,7 @@ def map_questions_to_variables(
     final_task = client.poll_task_completion(
         task_result.task_id,
         poll_interval=10,
-        max_wait=1200,
+        max_wait=3600,
         show_thinking=show_progress
     )
     
@@ -98,7 +152,8 @@ def map_questions_to_variables(
         print(f"    - Questions mapped: {len(result.get('questions_mapped', []))}")
         print(f"    - Unmapped vars: {len(result.get('unmapped_vars', []))}")
     
-    return result
+    credits = final_task.get("credit_usage") or 0
+    return result, {"credits": credits}
 
 
 def _build_mapping_prompt(num_vars: int, num_questions: int) -> str:
@@ -156,35 +211,15 @@ EVIDENCE-BASED MAPPING (USE AT LEAST 2 SIGNALS)
 Use these evidence signals to map questions to variables:
 
 A) VARIABLE NAMING PATTERNS:
-   - Shared stems/prefixes (<VAR>_1, <VAR>_2, <VAR>_3 → multi-select for that question)
+   - Shared stems/prefixes indicate multi-select groups
    - Numeric suffixes indicating set membership
-   - Row/column patterns for grids (<VAR>_r1_c1, <VAR>_r1_c2, <VAR>_r2_c1)
-   - Terminal codes: _97, _98, _99 often indicate exclusive anchors (None/DK/RF)
+   - Row/column patterns for grids (two dimensions in naming)
    
-   PATTERN-BASED GROUPING AND DISCOVERY:
-   - When you identify a naming pattern, use it as a search query to find ALL variables matching that pattern
-   - Patterns define groups: variables sharing a pattern likely belong together
-   - To create new groups: Search dataset_inventory for all variables matching an identified pattern
-   - To fill existing groups: After mapping some variables, search for additional variables matching the same pattern
-   - Verify completeness: Compare found variables against all variables matching the pattern in dataset_inventory
-   
-   PROACTIVE PATTERN DISCOVERY (After initial mapping):
-   - Scan dataset_inventory for common multi-select patterns:
-     * Sequential suffixes: _r1, _r2, _r3 or _1, _2, _3 patterns
-     * Shared prefixes with numeric suffixes indicating options
-   - For each pattern found, check if variables are already mapped
-   - If unmapped variables form a clear pattern group, investigate if they represent a question:
-     * Check variable labels for common question text
-     * Check if they form a logical multi-select group
-     * If yes, create a new question mapping for this group
-   - This helps discover questions that may not be clearly represented in the PDF structure
-   
-   PATTERN VERIFICATION (After mapping each question):
-   - Extract the pattern from mapped variables
-   - Search dataset_inventory for ALL variables matching that pattern
-   - Compare: found variables vs. all matching variables in dataset_inventory
+   GROUPING AND COMPLETENESS:
+   - When you identify a naming pattern, find ALL variables matching that pattern in dataset_inventory
+   - Verify completeness: found variables vs. all matching variables
    - If missing variables found, add them to the question's vars array
-   - This verification must happen BEFORE finalizing the mapping
+   - PRESERVE from input: grid_rows, grid_columns, answer_options (when present on questionnaire questions)
 
 B) VARIABLE LABELS:
    - Label text matches or closely resembles question text
@@ -211,10 +246,8 @@ The PDF may say "grid" but data could be multi-select, or vice versa.
 HOW TO DETECT FROM DATA:
 
 1) MULTI-SELECT (1-dimensional, flat list):
-   - Variables: <VAR>_1, <VAR>_2, <VAR>_3, <VAR>_97 (shared prefix + option suffix)
-   - Each variable = one option, binary coded (0/1 selected/not)
-   - vars = ["<VAR>_1", "<VAR>_2", "<VAR>_3", "<VAR>_97"] (flat list)
-   - Include exclusive anchors (_97/_98/_99)
+   - Variables share prefix with option suffixes; each var = one option, binary (0/1)
+   - vars = flat list of all option variables
    - Use the pattern to search dataset_inventory for all matching variables to ensure completeness
 
 2) GRID (2-dimensional, rows × columns):
@@ -243,11 +276,6 @@ DETECTION PRINCIPLE:
    - Variables with iteration suffix (_1, _2, _3 representing loop iterations)
    - Same question asked multiple times for different items
 
-5) EXCLUSIVE ANCHORS:
-   - Variables ending in _97, _98, _99 within multi-select
-   - Represent "None of the above", "Don't know", "Refuse to answer"
-   - MUST be included in the multi-select vars list
-
 =============================================================================
 CRITICAL RULES
 =============================================================================
@@ -258,7 +286,7 @@ CRITICAL RULES
 4) For grids: vars MUST be list of lists (each inner list = one row)
 5) For multi_select: vars MUST be flat list (not nested)
 6) Only use ACTUAL variable names from dataset_inventory.json
-7) Include exclusive anchors (_97/_98/_99) in multi-select vars
+7) Preserve grid_rows, grid_columns, answer_options from questionnaire input
 
 =============================================================================
 IMPORTANT: MAPPING ENABLES LOGIC
@@ -266,13 +294,7 @@ IMPORTANT: MAPPING ENABLES LOGIC
 
 The "vars" array you create for each question is CRITICAL for downstream logic.
 After this step, ALL logic will reference DATA VARIABLES (not question IDs).
-
-Example: If QA asks a question and maps to variable "<VAR_A>":
-- Question ID: "QA" (from PDF)
-- vars: ["<VAR_A>"] (from data)
-- Later logic will say: "if <VAR_A> == 1" NOT "if QA == 1"
-
-So accurate mapping is essential - every question needs correct vars from the data.
+Accurate mapping is essential - every question needs correct vars from the data.
 
 =============================================================================
 CRITICAL: ACCOUNT FOR EVERY SINGLE VARIABLE
@@ -347,7 +369,7 @@ def main():
     with open(args.structure) as f:
         structure = json.load(f)
     
-    result = map_questions_to_variables(inventory, structure, show_progress=not args.quiet)
+    result, _ = map_questions_to_variables(inventory, structure, show_progress=not args.quiet)
     
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w") as f:

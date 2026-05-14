@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Step 7: Validation (PASS 4 - FINAL VALIDATION)
+Step 8: Validation (PASS 4 - FINAL VALIDATION)
 
 Validates final JSON against all 14 checks from master prompt.
 REJECT/REGENERATE if any check fails.
@@ -22,7 +22,7 @@ Master Prompt PASS 4 Checks:
 14) questions[] order exactly matches PDF order
 
 Usage:
-    python s7_validate.py --json s6_result.json --inventory s2_result.json --structure s1_result.json
+    python s8_validate.py --json s6_result.json --inventory s2_result.json --structure s1_result.json
 """
 
 import json
@@ -30,7 +30,7 @@ import re
 import argparse
 from typing import Dict, List, Tuple, Set
 
-from utils import flatten_vars
+from logic_platform.utils import flatten_vars
 
 # =============================================================================
 # ALLOWED VALUES (FROM MASTER PROMPT - PRE-FLIGHT CONTRACT)
@@ -80,10 +80,14 @@ def validate_final_output(
     final_json: Dict,
     dataset_vars: List[str] = None,
     pdf_questions: List[Dict] = None,
-    routing_instructions: List[Dict] = None
+    routing_instructions: List[Dict] = None,
+    pattern_report: Dict = None
 ) -> Tuple[bool, Dict[str, dict]]:
     """
     Validate final JSON against all 14 checks from PASS 4.
+    
+    When pattern_report is provided, check 08 uses exclusive_anchors (data-driven).
+    Otherwise falls back to legacy anchor detection.
     
     Returns:
         Tuple of (all_passed, detailed_report)
@@ -91,6 +95,7 @@ def validate_final_output(
     dataset_vars = dataset_vars or []
     pdf_questions = pdf_questions or []
     routing_instructions = routing_instructions or []
+    pattern_report = pattern_report or {}
     
     report = {}
     
@@ -102,7 +107,7 @@ def validate_final_output(
     report["05_skip_target_based"] = check_05_skip_target_based(final_json)
     report["06_skip_routing_expanded"] = check_06_skip_routing_expanded(final_json, routing_instructions, pdf_questions)
     report["07_section_gates_expanded"] = check_07_section_gates(final_json, routing_instructions)
-    report["08_exclusive_rules"] = check_08_exclusive_rules(final_json)
+    report["08_exclusive_rules"] = check_08_exclusive_rules(final_json, pattern_report)
     report["09_count_rules"] = check_09_count_rules(final_json, routing_instructions)
     report["10_sum_rules"] = check_10_sum_rules(final_json, routing_instructions)
     report["11_piping_answer_level"] = check_11_piping_answer_level(final_json)
@@ -358,32 +363,52 @@ def check_07_section_gates(final_json: Dict, routing: List[Dict]) -> dict:
 
 
 # =============================================================================
-# CHECK 8: Exclusive rules present where applicable (97/98/99 and none/DK/RF)
+# CHECK 8: Exclusive rules present where applicable (none/DK/RF anchors)
 # =============================================================================
 
-def check_08_exclusive_rules(final_json: Dict) -> dict:
+def check_08_exclusive_rules(final_json: Dict, pattern_report: Dict = None) -> dict:
     """
-    Master prompt PASS 4 #8: Exclusive rules present where applicable 
-    (including 97/98/99 and none/DK/RF patterns).
+    Master prompt PASS 4 #8: Exclusive rules present where applicable.
+    When pattern_report provided: use exclusive_anchors (data-driven).
+    Otherwise fallback: detect anchors by common code patterns across survey conventions.
     """
     issues = []
+    pattern_report = pattern_report or {}
+    anchors = pattern_report.get("exclusive_anchors", [])
     
-    for q in final_json.get("questions", []):
-        if q.get("type") != "multi_select":
-            continue
-        
-        vars_list = flatten_vars(q.get("vars", []))
-        
-        # Detect exclusive anchors
-        has_exclusive_anchor = any(
-            v.endswith("_97") or v.endswith("_98") or v.endswith("_99") or
-            "_none" in v.lower() or "_dk" in v.lower() or "_rf" in v.lower() or
-            "none" in v.lower() or "other" not in v.lower() and "oth" not in v.lower()
-            for v in vars_list
-            if v.endswith("_97") or v.endswith("_98") or v.endswith("_99")
-        )
-        
-        if has_exclusive_anchor:
+    if anchors:
+        # Data-driven: use pattern_report.exclusive_anchors
+        anchor_by_qid = {a.get("question_id"): a for a in anchors if a.get("question_id")}
+        for q in final_json.get("questions", []):
+            qid = q.get("id")
+            entry = anchor_by_qid.get(qid)
+            if not entry or not entry.get("vars"):
+                continue
+            has_exclusive_logic = any(
+                l.get("type") == "exclusive" for l in q.get("logics", [])
+            )
+            if not has_exclusive_logic:
+                issues.append(
+                    f"Question {qid}: pattern_report marks exclusive anchors but no exclusive logic"
+                )
+    else:
+        # Fallback: detect anchors by common exclusive-option suffixes
+        # Supports _97/_98/_99 (Jewelry), _997/_998/_999 (Escalent), r97/r98/r99, etc.
+        def _is_exclusive_anchor(v: str) -> bool:
+            if not v:
+                return False
+            return (
+                v.endswith("_97") or v.endswith("_98") or v.endswith("_99") or
+                v.endswith("_997") or v.endswith("_998") or v.endswith("_999") or
+                v.endswith("r97") or v.endswith("r98") or v.endswith("r99") or
+                v.endswith("r997") or v.endswith("r998") or v.endswith("r999")
+            )
+        for q in final_json.get("questions", []):
+            if q.get("type") != "multi_select":
+                continue
+            vars_list = flatten_vars(q.get("vars", []))
+            if not any(_is_exclusive_anchor(v) for v in vars_list):
+                continue
             has_exclusive_logic = any(
                 l.get("type") == "exclusive" for l in q.get("logics", [])
             )
@@ -595,7 +620,7 @@ def print_report(report: Dict[str, dict]) -> None:
         "05_skip_target_based": "Skip rules target-based, target_vars = question vars",
         "06_skip_routing_expanded": "Skip-to-question/section fully expanded",
         "07_section_gates_expanded": "Section gates expanded to all questions",
-        "08_exclusive_rules": "Exclusive rules for 97/98/99 and none/DK/RF",
+        "08_exclusive_rules": "Exclusive rules for none/DK/RF anchors where applicable",
         "09_count_rules": "Count rules for min/max/exactly",
         "10_sum_rules": "Sum rules for add-up constraints",
         "11_piping_answer_level": "Piping is answer-level only",
@@ -644,13 +669,13 @@ def print_report(report: Dict[str, dict]) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 7: Validate final JSON (PASS 4)")
+    parser = argparse.ArgumentParser(description="Step 8: Validate final JSON (PASS 4)")
     parser.add_argument("--json", "-j", required=True, help="Path to final JSON")
     parser.add_argument("--inventory", "-i", help="Path to dataset inventory (for var mapping check)")
     parser.add_argument("--structure", "-s", help="Path to PDF structure (for order/routing checks)")
     args = parser.parse_args()
     
-    print("\n[Step 7] Final Validation (PASS 4 - 14 CHECKS)")
+    print("\n[Step 8] Final Validation (PASS 4 - 14 CHECKS)")
     print("=" * 50)
     
     with open(args.json) as f:

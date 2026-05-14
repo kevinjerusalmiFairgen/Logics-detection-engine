@@ -20,21 +20,22 @@ import os
 import argparse
 from typing import Dict, List
 
-from utils import ManusAPIClient, extract_json_from_task
+from logic_platform.utils import ManusAPIClient, extract_json_from_task
+from logic_platform.opus_utils import call_opus_json, estimate_opus_cost
 
 
 def resolve_unmapped_variables(
     questions_mapped: List[Dict],
     unmapped_vars: List[str],
     dataset_inventory: List[Dict],
-    show_progress: bool = True
-) -> Dict:
+    show_progress: bool = True,
+    engine: str = "manus",
+) -> tuple:
     """
-    Use Manus to resolve unmapped variables (PASS 2B).
-    Uploads data as files instead of embedding in prompt.
+    Resolve unmapped variables (PASS 2B).
     
     Returns:
-        Dict with: derived_variables, questions_updated
+        (result_dict, cost_info) - cost_info is {"credits": N} or {"input_tokens": N, "output_tokens": N}
     """
     if not unmapped_vars:
         if show_progress:
@@ -42,8 +43,55 @@ def resolve_unmapped_variables(
         return {
             "derived_variables": [],
             "questions_updated": questions_mapped
-        }
-    
+        }, {"credits": 0} if engine == "manus" else {"input_tokens": 0, "output_tokens": 0}
+
+    if engine == "opus":
+        return _resolve_with_opus(questions_mapped, unmapped_vars, dataset_inventory, show_progress)
+    return _resolve_with_manus(questions_mapped, unmapped_vars, dataset_inventory, show_progress)
+
+
+def _resolve_with_opus(
+    questions_mapped: List[Dict],
+    unmapped_vars: List[str],
+    dataset_inventory: List[Dict],
+    show_progress: bool,
+) -> tuple:
+    """Use Claude Opus 4.6 on Vertex AI."""
+    unmapped_metadata = [v for v in dataset_inventory if v["var"] in unmapped_vars]
+    unmapped_data = {"unmapped_vars": unmapped_vars, "unmapped_metadata": unmapped_metadata}
+    prompt = _build_resolution_prompt(len(questions_mapped), len(unmapped_vars))
+    prompt = prompt.replace("INPUT FILES (ATTACHED)", "INPUT DATA (provided below as JSON)")
+    prompt = prompt.replace(
+        "You MUST save your output to a file named: resolution_output.json\n\nThe file MUST have this EXACT structure:",
+        "Respond with ONLY a valid JSON object. No markdown, no code blocks. Use this EXACT structure:"
+    )
+    prompt = prompt.replace(
+        "After validation passes, SAVE your result to: resolution_output.json\nThe file must contain valid JSON with \"derived_variables\" and \"questions_updated\" arrays.",
+        "After validation passes, respond with the JSON object containing \"derived_variables\" and \"questions_updated\" arrays."
+    )
+    result, usage = call_opus_json(
+        prompt,
+        {"questions_mapped.json": questions_mapped, "unmapped_vars.json": unmapped_data},
+        show_progress=show_progress,
+    )
+    derived = result.get("derived_variables") or result.get("derived") or []
+    questions = result.get("questions_updated") or result.get("questions") or result.get("questions_mapped") or []
+    result = {"derived_variables": derived, "questions_updated": questions}
+    if show_progress:
+        print(f"  Resolution complete:")
+        print(f"    - Derived variables: {len(derived)}")
+        print(f"    - Questions updated: {len(questions)}")
+        print(f"    - Tokens: {usage['input_tokens']} in, {usage['output_tokens']} out (~${estimate_opus_cost(usage['input_tokens'], usage['output_tokens']):.4f})")
+    return result, usage
+
+
+def _resolve_with_manus(
+    questions_mapped: List[Dict],
+    unmapped_vars: List[str],
+    dataset_inventory: List[Dict],
+    show_progress: bool,
+) -> tuple:
+    """Use Manus to resolve unmapped variables."""
     client = ManusAPIClient()
     
     # Get metadata for unmapped vars
@@ -85,7 +133,7 @@ def resolve_unmapped_variables(
     final_task = client.poll_task_completion(
         task_result.task_id,
         poll_interval=10,
-        max_wait=1200,
+        max_wait=3600,
         show_thinking=show_progress
     )
     
@@ -117,7 +165,8 @@ def resolve_unmapped_variables(
         print(f"    - Derived variables: {len(result.get('derived_variables', []))}")
         print(f"    - Questions updated: {len(result.get('questions_updated', []))}")
     
-    return result
+    credits = final_task.get("credit_usage") or 0
+    return result, {"credits": credits}
 
 
 def _build_resolution_prompt(num_questions: int, num_unmapped: int) -> str:
@@ -153,6 +202,7 @@ The file MUST have this EXACT structure:
     // ALL questions from questions_mapped.json
     // WITH any newly attached vars or new questions added
     // Same structure: id, section, text, type, vars, answers:{{}}, logics:[]
+    // PRESERVE: grid_rows, grid_columns, answer_options from input when present
   ]
 }}
 
@@ -333,6 +383,7 @@ OUTPUT FORMAT (STRICT JSON)
     // Same structure as questions_mapped input
     // WITH any newly attached vars or new questions added
     // Preserve exact order
+    // PRESERVE: grid_rows, grid_columns, answer_options from input when present
     // Every question: "answers": {{}}, "logics": []
   ]
 }}
@@ -405,7 +456,7 @@ def main():
         inv_data = json.load(f)
     inventory = inv_data if isinstance(inv_data, list) else inv_data.get("variables", [])
     
-    result = resolve_unmapped_variables(
+    result, _ = resolve_unmapped_variables(
         mapped_data.get("questions_mapped", []),
         mapped_data.get("unmapped_vars", []),
         inventory,

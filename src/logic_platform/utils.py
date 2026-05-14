@@ -8,6 +8,7 @@ import os
 import json
 import time
 import requests
+import hashlib
 from typing import Optional, Callable, Dict, List, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,14 @@ class TaskResult:
     task_title: str
     task_url: str
     share_url: Optional[str] = None
+
+
+class ManusAPIError(Exception):
+    """Error returned by the Manus API."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass
@@ -76,7 +85,7 @@ class ManusAPIClient:
                 error_msg += f" - {json.dumps(error_detail)}"
             except:
                 error_msg += f" - {response.text}"
-            raise Exception(error_msg)
+            raise ManusAPIError(error_msg, response.status_code)
         
         return response.json()
     
@@ -90,12 +99,16 @@ class ManusAPIClient:
         with open(file_path, "rb") as f:
             file_content = f.read()
         
-        if file_path.lower().endswith(".pdf"):
-            content_type = "application/pdf"
-        elif file_path.lower().endswith(".sav"):
-            content_type = "application/x-spss-sav"
-        else:
-            content_type = "application/octet-stream"
+        ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
+        content_types = {
+            "pdf": "application/pdf",
+            "sav": "application/x-spss-sav",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "csv": "text/csv",
+            "json": "application/json",
+        }
+        content_type = content_types.get(ext, "application/octet-stream")
         
         response = requests.put(
             upload_url,
@@ -139,31 +152,144 @@ class ManusAPIClient:
         attachments: Optional[list[dict]] = None,
         agent_profile: str = "manus-1.6",
         task_mode: str = "agent",
-        create_shareable_link: bool = True
+        create_shareable_link: bool = False,
+        interactive_mode: bool = False
     ) -> TaskResult:
-        """Create a new task."""
+        """Create a new task. create_shareable_link=False saves backend work for automated runs."""
+        task_key = self._task_registry_key(prompt, agent_profile, task_mode)
+        registered = self._registered_task(task_key)
+        if registered:
+            return registered
+
         data = {
             "prompt": prompt,
             "agentProfile": agent_profile,
             "taskMode": task_mode,
-            "createShareableLink": create_shareable_link
+            "createShareableLink": create_shareable_link,
+            "interactiveMode": interactive_mode
         }
         
         if attachments:
             data["attachments"] = attachments
         
         result = self._request("POST", "/tasks", json=data)
-        
-        return TaskResult(
+
+        task_result = TaskResult(
             task_id=result.get("task_id"),
             task_title=result.get("task_title"),
             task_url=result.get("task_url"),
             share_url=result.get("share_url")
         )
+        self._record_task(task_key, task_result, agent_profile, task_mode)
+        return task_result
     
     def get_task(self, task_id: str) -> dict:
         """Get task details by ID."""
         return self._request("GET", f"/tasks/{task_id}")
+
+    def _task_registry_path(self) -> Optional[Path]:
+        registry = os.getenv("LOGIC_PLATFORM_MANUS_TASK_REGISTRY")
+        return Path(registry) if registry else None
+
+    def _task_registry_key(self, prompt: str, agent_profile: str, task_mode: str) -> str:
+        payload = json.dumps(
+            {
+                "prompt": prompt,
+                "agent_profile": agent_profile,
+                "task_mode": task_mode,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _load_task_registry(self) -> dict:
+        path = self._task_registry_path()
+        if not path or not path.is_file():
+            return {"tasks": {}}
+        try:
+            with path.open(encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            return {"tasks": {}}
+        return payload if isinstance(payload, dict) else {"tasks": {}}
+
+    def _save_task_registry(self, payload: dict) -> None:
+        path = self._task_registry_path()
+        if not path:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _registered_task(self, task_key: str) -> Optional[TaskResult]:
+        if os.getenv("LOGIC_PLATFORM_MANUS_REUSE_TASKS", "1") != "1":
+            return None
+        registry = self._load_task_registry()
+        entry = registry.get("tasks", {}).get(task_key)
+        if not entry:
+            return None
+        if entry.get("status") in {"failed", "cancelled", "not_found"}:
+            return None
+
+        task_id = entry.get("task_id")
+        if not task_id:
+            return None
+
+        max_age_hours = float(os.getenv("LOGIC_PLATFORM_MANUS_TASK_TTL_HOURS", "12"))
+        age_seconds = time.time() - float(entry.get("created_at", 0))
+        if age_seconds > max_age_hours * 3600:
+            return None
+
+        try:
+            task = self.get_task(task_id)
+            status = task.get("status", "unknown")
+            if status in {"failed", "cancelled"}:
+                return None
+        except ManusAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            print(f"  Reusing registered Manus task not visible yet: {task_id}")
+        else:
+            print(f"  Reusing registered Manus task: {task_id} ({status})")
+
+        return TaskResult(
+            task_id=task_id,
+            task_title=entry.get("task_title", ""),
+            task_url=entry.get("task_url", f"https://manus.im/app/{task_id}"),
+            share_url=entry.get("share_url"),
+        )
+
+    def _record_task(
+        self,
+        task_key: str,
+        task_result: TaskResult,
+        agent_profile: str,
+        task_mode: str,
+    ) -> None:
+        registry = self._load_task_registry()
+        tasks = registry.setdefault("tasks", {})
+        tasks[task_key] = {
+            "task_id": task_result.task_id,
+            "task_title": task_result.task_title,
+            "task_url": task_result.task_url,
+            "share_url": task_result.share_url,
+            "agent_profile": agent_profile,
+            "task_mode": task_mode,
+            "status": "created",
+            "created_at": time.time(),
+        }
+        self._save_task_registry(registry)
+
+    def _mark_registered_task_status(self, task_id: str, status: str) -> None:
+        registry = self._load_task_registry()
+        changed = False
+        for entry in registry.get("tasks", {}).values():
+            if entry.get("task_id") == task_id:
+                entry["status"] = status
+                entry["updated_at"] = time.time()
+                changed = True
+        if changed:
+            self._save_task_registry(registry)
     
     def poll_task_completion(
         self,
@@ -172,17 +298,35 @@ class ManusAPIClient:
         max_wait: int = 3600,
         show_thinking: bool = False,
         on_thinking: Optional[Callable[[str], None]] = None,
-        initial_delay: int = 3
+        initial_delay: int = 1
     ) -> dict:
-        """Poll for task completion with optional thinking output."""
+        """Poll for task completion with optional thinking output. initial_delay=1 reduces idle wait."""
         if initial_delay > 0:
             time.sleep(initial_delay)
         
         start_time = time.time()
+        missing_task_retries = 0
+        max_missing_task_retries = max(6, min(18, max_wait // max(poll_interval, 1)))
         last_message_count = 0
         
         while time.time() - start_time < max_wait:
-            task = self.get_task(task_id)
+            try:
+                task = self.get_task(task_id)
+                missing_task_retries = 0
+            except ManusAPIError as exc:
+                if exc.status_code != 404:
+                    raise
+                if missing_task_retries >= max_missing_task_retries:
+                    self._mark_registered_task_status(task_id, "not_found")
+                    raise
+                missing_task_retries += 1
+                elapsed = int(time.time() - start_time)
+                print(
+                    f"  [{elapsed}s] Task not visible yet "
+                    f"({missing_task_retries}/{max_missing_task_retries}); retrying..."
+                )
+                time.sleep(poll_interval)
+                continue
             status = task.get("status", "unknown")
             
             if show_thinking or on_thinking:
@@ -205,6 +349,7 @@ class ManusAPIClient:
                     last_message_count = len(output)
             
             if status in ["completed", "failed", "cancelled"]:
+                self._mark_registered_task_status(task_id, status)
                 return task
             
             elapsed = int(time.time() - start_time)
@@ -236,36 +381,42 @@ class ManusAPIClient:
 # =============================================================================
 
 def extract_json_from_task(client: ManusAPIClient, task: Dict) -> Any:
-    """Extract JSON result from completed task output."""
+    """Extract JSON result from completed task output.
+    
+    Prioritizes known output filenames (single fetch), falls back to scanning content.
+    """
     output = task.get("output", [])
     
-    # First check for output files - they're more reliable
-    # Prioritize our specific expected output files
     expected_outputs = [
         "pdf_structure.json",
-        "mapping_output.json", 
+        "mapping_output.json",
         "resolution_output.json",
-        "logic_output.json"
+        "logic_output.json",   # before pattern_report: Logic step can output both
+        "pattern_report.json"
     ]
     
     files = client.extract_output_files(task)
-    
-    # First pass: look for specifically named files
-    for expected_name in expected_outputs:
-        for file in files:
-            if file.filename == expected_name:
-                print(f"  [INFO] Found expected output file: {expected_name}")
-                response = requests.get(file.url)
+    if files:
+        files_by_name = {f.filename: f for f in files}
+        if len(files) <= 3:
+            print(f"  [INFO] Task output files: {list(files_by_name)}")
+        
+        # Direct lookup: fetch first matching expected file (one HTTP request)
+        for expected_name in expected_outputs:
+            f = files_by_name.get(expected_name)
+            if f:
+                print(f"  [INFO] Selected output: {expected_name}")
+                response = requests.get(f.url)
                 if response.ok:
                     return response.json()
-    
-    # Second pass: any JSON file
-    for file in files:
-        if file.filename.endswith(".json"):
-            print(f"  [INFO] Found JSON output file: {file.filename}")
-            response = requests.get(file.url)
-            if response.ok:
-                return response.json()
+        
+        # Fallback: any JSON file
+        for f in files:
+            if f.filename.endswith(".json"):
+                print(f"  [INFO] Found JSON output: {f.filename}")
+                response = requests.get(f.url)
+                if response.ok:
+                    return response.json()
     
     # Collect ALL content from assistant messages
     all_text = []

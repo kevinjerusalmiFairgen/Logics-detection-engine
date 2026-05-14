@@ -1,0 +1,14 @@
+{
+  "derived_variables": [],
+  "questions": [
+    {
+      "id": "Q1",
+      "section": "S",
+      "text": "Choose options",
+      "type": "multi_select",
+      "vars": ["Q1r1", "Q1r2"],
+      "answers": {},
+      "logics": []
+    }
+  ]
+}

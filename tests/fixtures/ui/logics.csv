@@ -1,0 +1,2 @@
+Target,Source,Constraint,B/F Relationship,Comment,Is Implemented,Custom Query,ID
+Q2,Q1,Block,Single to Single,Block Q2 when Q1 is 1,Yes,,1

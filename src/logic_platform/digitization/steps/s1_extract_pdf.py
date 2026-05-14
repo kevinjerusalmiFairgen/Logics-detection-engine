@@ -1,83 +1,178 @@
 #!/usr/bin/env python3
 """
-Step 1: PDF Extraction with Manus Vision (PASS 1B)
+Step 1: PDF Extraction (PASS 1B)
 
-Extracts sections, question IDs, question text, routing, ask-if, 
+Default: Claude Opus 4.6 on Vertex AI.
+Optional: --engine manus for Manus Vision.
+
+Extracts sections, question IDs, question text, routing, ask-if,
 exclusivity, min/max/exactly, sums, carry-forward/filtering rules.
 Removes termination/screenout wording - keeps only eligibility predicates.
 
 Usage:
     python s1_extract_pdf.py survey.pdf --output s1_result.json
+    python s1_extract_pdf.py survey.pdf --engine manus
 """
 
 import json
 import os
+import re
 import argparse
-from typing import Dict
+import base64
+import time
+from typing import Dict, Tuple
 
-from utils import ManusAPIClient, extract_json_from_task
+from logic_platform.utils import ManusAPIClient, extract_json_from_task
 
 
-def extract_pdf_structure(pdf_path: str, show_progress: bool = True) -> Dict:
+def _extract_with_opus(pdf_path: str, instruction: str, project: str, location: str, show_progress: bool) -> tuple:
+    """Use Claude Opus 4.6 on Vertex AI. Returns (result_dict, usage_dict).
+    Uses streaming (required for long PDF extraction >10min)."""
+    from anthropic import AnthropicVertex
+
+    with open(pdf_path, "rb") as f:
+        pdf_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    client = AnthropicVertex(project_id=project, region=location)
+
+    if show_progress:
+        print("  Sending PDF + prompt to Claude Opus 4.6...")
+    start = time.time()
+
+    text = ""
+    usage = {}
+    with client.messages.stream(
+        model="claude-opus-4-6",
+        max_tokens=65536,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64,
+                        },
+                    },
+                    {"type": "text", "text": instruction},
+                ],
+            }
+        ],
+    ) as stream:
+        for text_delta in stream.text_stream:
+            text += text_delta
+        final = stream.get_final_message()
+        if final and hasattr(final, "usage") and final.usage:
+            u = final.usage
+            usage = {"input_tokens": getattr(u, "input_tokens", 0), "output_tokens": getattr(u, "output_tokens", 0)}
+
+    elapsed = time.time() - start
+    if show_progress:
+        print(f"  Response received in {elapsed:.1f}s")
+    if not usage:
+        usage = {"input_tokens": 0, "output_tokens": 0}
+    return _parse_json_response(text), usage
+
+
+def _parse_json_response(text: str) -> dict:
+    """Extract JSON from model response (may be wrapped in markdown/code blocks)."""
+    text = text.strip()
+    for pattern in [
+        r"^```(?:json)?\s*\n?(.*?)\n?```\s*$",
+        r"```json\s*(.*?)```",
+    ]:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            text = m.group(1).strip()
+            break
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        start, end = text.find("{"), text.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(f"Failed to parse JSON from response: {e}") from e
+
+
+def extract_pdf_structure(pdf_path: str, show_progress: bool = True, engine: str = "opus") -> Tuple[Dict, int]:
     """
-    Use Manus Vision to extract sections, questions, and logic from PDF.
-    
+    Extract sections, questions, and logic from PDF.
+
     Args:
         pdf_path: Path to the survey PDF file
         show_progress: Whether to display progress during extraction
-        
+        engine: "opus" (default, Claude Opus 4.6 on Vertex) or "manus"
+
     Returns:
-        Dict with keys: sections, questions, logic_instructions
+        (Dict with keys: sections, questions, logic_instructions, Credits used (0 for Opus))
     """
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
-    
-    client = ManusAPIClient()
-    
+
+    if engine == "opus":
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "fairgen-common")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-east5")
+        if show_progress:
+            print(f"  Using Claude Opus 4.6 (Vertex AI): project={project}, location={location}")
+
+        prompt = _build_extraction_prompt()
+        instruction = prompt.replace(
+            "SAVE your result to a file named: pdf_structure.json\n\nThe file must be a valid JSON object",
+            "Respond with ONLY a valid JSON object (no markdown, no code blocks, no explanation). "
+            "The JSON must have exactly three keys"
+        )
+        instruction += "\n\nOutput ONLY the JSON object, nothing else. No ```json or markdown wrapping."
+
+        result, usage = _extract_with_opus(pdf_path, instruction, project, location, show_progress)
+        if show_progress:
+            print(f"  Extraction complete:")
+            print(f"    - Sections: {len(result.get('sections', []))}")
+            print(f"    - Questions: {len(result.get('questions', []))}")
+            print(f"    - Logic instructions: {len(result.get('logic_instructions', []))}")
+        return result, usage
+
+    # Manus
     if show_progress:
         print(f"  Uploading PDF: {pdf_path}")
-    
+    client = ManusAPIClient()
     upload_result = client.upload_file(pdf_path)
-    
     if show_progress:
         print(f"  File uploaded: {upload_result.file_id}")
-    
+
     prompt = _build_extraction_prompt()
-    
     if show_progress:
         print("  Creating extraction task...")
-    
     task_result = client.create_task(
         prompt=prompt,
         attachments=[{"file_id": upload_result.file_id}],
         agent_profile="manus-1.6",
         task_mode="agent"
     )
-    
     if show_progress:
         print(f"  Task created: {task_result.task_id}")
         print(f"  Task URL: {task_result.task_url}")
         print("  Waiting for completion...")
-    
     final_task = client.poll_task_completion(
         task_result.task_id,
         poll_interval=10,
         max_wait=1800,
         show_thinking=show_progress
     )
-    
     if final_task.get("status") != "completed":
         raise Exception(f"Task failed: {final_task.get('status')}")
-    
     result = extract_json_from_task(client, final_task)
-    
     if show_progress:
         print(f"  Extraction complete:")
         print(f"    - Sections: {len(result.get('sections', []))}")
         print(f"    - Questions: {len(result.get('questions', []))}")
         print(f"    - Logic instructions: {len(result.get('logic_instructions', []))}")
-    
-    return result
+    credits = final_task.get("credit_usage") or 0
+    return result, {"credits": credits}
 
 
 def _build_extraction_prompt() -> str:
@@ -150,6 +245,7 @@ For each question, extract:
   * "open_text" - free text response
 - grid_rows: (only for grid) Row labels in order
 - grid_columns: (only for grid) Column labels in order
+- answer_options: (for multi_select when visible) Option labels in order
 
 IMPORTANT - GRID vs MULTI_SELECT:
 - "grid" = TRUE 2D matrix: rows × columns where EACH row is rated/scored on MULTIPLE columns
@@ -213,9 +309,15 @@ Extract ALL logic instructions into these categories:
 
 8) piping
    - raw_text: Exact wording
-   - source_question: Question providing the selections
+   - source_question: Question providing the selections (exactly ONE per instruction)
    - target_question: Question receiving filtered options
    - page: Page number
+   - Each piping is one questionnaire question to another. Either can be a grid
+     (multi-column) question—still one source_question, one target_question.
+   - FUNNEL DECOMPOSITION: If the PDF describes a chain (Q1 to Q2 to Q3) or multiple
+     sources (from X and Y to Z), extract MULTIPLE piping instructions - one per link.
+     Example: "From C26 and C28 to C30" → two instructions: C26→C30 and C28→C30.
+     Example: "Q1 to Q2 to Q3" → two instructions: Q1→Q2 and Q2→Q3.
 
 =============================================================================
 OUTPUT FORMAT (STRICT JSON)
@@ -317,6 +419,9 @@ CRITICAL RULES
 6) Note exclusive options (None/DK/RF) which typically cannot combine with others
 7) Identify min/max/exactly constraints on multi-select questions
 8) Extract section eligibility gates
+9) PIPING: One source question → one target question per instruction. Either can be
+   a grid (multi-column) question. Decompose chains and multi-source: "from X and Y
+   to Z" → X→Z, Y→Z. "Q1 to Q2 to Q3" → Q1→Q2, Q2→Q3.
 
 =============================================================================
 FINAL STEP - SAVE OUTPUT
@@ -333,20 +438,36 @@ The file must be a valid JSON object with exactly three keys:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 1: Extract PDF structure with Manus Vision")
+    parser = argparse.ArgumentParser(
+        description="Step 1: Extract PDF structure (default: Claude Opus 4.6, optional: Manus)"
+    )
     parser.add_argument("pdf_path", help="Path to the PDF file")
     parser.add_argument("--output", "-o", default="output/s1_pdf_structure.json", help="Output JSON file")
+    parser.add_argument(
+        "--engine", "-e",
+        choices=["opus", "manus"],
+        default="opus",
+        help="opus (Claude Opus 4.6, default) or manus (Manus Vision)",
+    )
     parser.add_argument("--quiet", "-q", action="store_true", help="Reduce output")
     args = parser.parse_args()
-    
+
     from dotenv import load_dotenv
     load_dotenv()
-    
-    print("\n[Step 1] PDF Extraction with Manus Vision (PASS 1B)")
+
+    engine_label = "Claude Opus 4.6" if args.engine == "opus" else "Manus Vision"
+    print(f"\n[Step 1] PDF Extraction ({engine_label})")
     print("=" * 50)
-    
-    result = extract_pdf_structure(args.pdf_path, show_progress=not args.quiet)
-    
+
+    result, credits = extract_pdf_structure(
+        args.pdf_path,
+        show_progress=not args.quiet,
+        engine=args.engine,
+    )
+
+    if not args.quiet and args.engine == "manus" and credits:
+        print(f"  Credits used: {credits}")
+
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(result, f, indent=2)

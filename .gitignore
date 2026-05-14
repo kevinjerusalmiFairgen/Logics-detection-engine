@@ -3,6 +3,7 @@
 
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.so
@@ -32,9 +33,15 @@ env/
 # IDE
 .vscode/
 .idea/
+.DS_Store
 
 # Output files
 output/
+runs/
+*.log
+node_modules/
+apps/web/dist/
+apps/web/tsconfig.tsbuildinfo
 
 # Data files
 Data/
