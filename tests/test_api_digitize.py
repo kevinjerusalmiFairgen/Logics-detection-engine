@@ -6,11 +6,11 @@ import apps.api.main as api_main
 from apps.api.main import app
 
 
-def fake_pipeline(pdf_path, data_path, artifacts, *, engine="opus", skip_validation=True):
+def fake_pipeline(pdf_path, data_path, artifacts, *, engine="manus", skip_validation=True):
     assert pdf_path.name == "questionnaire.pdf"
     assert data_path.name == "data.csv"
     assert artifacts.run_dir.name
-    assert engine == "opus"
+    assert engine == "manus"
     assert skip_validation is True
     questionnaire = {
         "derived_variables": [],

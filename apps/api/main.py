@@ -706,7 +706,7 @@ async def review_fairset_from_history(run_id: str, fairset_file: UploadFile = Fi
 async def create_logics_run(
     questionnaire_pdf: UploadFile = File(...),
     data_file: UploadFile = File(...),
-    engine: str = "opus",
+    engine: str = "manus",
     skip_validation: bool = True,
     project_name: str | None = Form(None),
 ) -> dict:

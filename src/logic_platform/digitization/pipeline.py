@@ -14,7 +14,7 @@ def run_digitization_pipeline(
     data_path: Path,
     artifacts: RunArtifacts,
     *,
-    engine: str = "opus",
+    engine: str = "manus",
     skip_validation: bool = True,
 ) -> dict[str, Any]:
     """Run the existing pipeline with all outputs scoped to one run directory."""

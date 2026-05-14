@@ -27,6 +27,11 @@ cd apps/web
 npm install
 ```
 
+### Environment variables
+
+- **`MANUS_API_KEY`** — required for the default pipeline (**Manus**). Used by the web UI and `POST /runs/logics`.
+- **`GOOGLE_CLOUD_PROJECT`** / **`GOOGLE_CLOUD_LOCATION`** — only if you explicitly use **`engine=opus`** (Claude on Vertex AI). New clones default to **Manus**, so collaborators usually do **not** need GCP access.
+
 ## Run Locally
 
 From the repo root:

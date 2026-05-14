@@ -74,11 +74,11 @@ def run_pipeline(
     save_intermediates: bool = False,
     show_progress: bool = True,
     skip_validation: bool = False,
-    engine: str = "opus",
+    engine: str = "manus",
     from_step: int = 1,
     intermediate_dir: str = "output",
 ) -> dict:
-    """Run the complete 8-step pipeline. engine: opus (default) or manus.
+    """Run the complete 8-step pipeline. engine: manus (default) or opus (Vertex AI).
 
     If from_step > 1, prior steps load JSON from intermediate_dir (no LLM cost
     for those steps). Use after a failure or to re-run only later steps.
@@ -418,8 +418,8 @@ Examples:
     parser.add_argument(
         "--engine", "-e",
         choices=["opus", "manus"],
-        default="opus",
-        help="LLM engine for all steps (1, 3-6): opus (Claude Opus 4.6, default) or manus",
+        default="manus",
+        help="LLM engine for all steps (1, 3-6): manus (default) or opus (Claude on Vertex AI)",
     )
     parser.add_argument(
         "--from-step",

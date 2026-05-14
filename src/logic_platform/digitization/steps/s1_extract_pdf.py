@@ -99,14 +99,14 @@ def _parse_json_response(text: str) -> dict:
         raise ValueError(f"Failed to parse JSON from response: {e}") from e
 
 
-def extract_pdf_structure(pdf_path: str, show_progress: bool = True, engine: str = "opus") -> Tuple[Dict, int]:
+def extract_pdf_structure(pdf_path: str, show_progress: bool = True, engine: str = "manus") -> Tuple[Dict, int]:
     """
     Extract sections, questions, and logic from PDF.
 
     Args:
         pdf_path: Path to the survey PDF file
         show_progress: Whether to display progress during extraction
-        engine: "opus" (default, Claude Opus 4.6 on Vertex) or "manus"
+        engine: "manus" (default, Manus Vision) or "opus" (Claude Opus 4.6 on Vertex AI)
 
     Returns:
         (Dict with keys: sections, questions, logic_instructions, Credits used (0 for Opus))
@@ -446,8 +446,8 @@ def main():
     parser.add_argument(
         "--engine", "-e",
         choices=["opus", "manus"],
-        default="opus",
-        help="opus (Claude Opus 4.6, default) or manus (Manus Vision)",
+        default="manus",
+        help="manus (Manus Vision, default) or opus (Claude Opus 4.6 on Vertex AI)",
     )
     parser.add_argument("--quiet", "-q", action="store_true", help="Reduce output")
     args = parser.parse_args()

@@ -6,7 +6,7 @@ import apps.api.main as api_main
 from apps.api.main import app
 
 
-def fake_pipeline(pdf_path, data_path, artifacts, *, engine="opus", skip_validation=True):
+def fake_pipeline(pdf_path, data_path, artifacts, *, engine="manus", skip_validation=True):
     questionnaire = {
         "derived_variables": [],
         "questions": [
