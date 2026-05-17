@@ -1,6 +1,12 @@
 import pandas as pd
 
-from logic_platform.fairset.validator import run_review_from_dataframes
+from logic_platform.fairset.validator import evaluate_constraints, run_review_from_dataframes
+
+
+def test_evaluate_constraints_accepts_none_constraints():
+    df = pd.DataFrame({"Q1": [1], "Q2": [2]})
+    report = evaluate_constraints(None, df, df)
+    assert report == []
 
 
 def test_review_from_dataframes_detects_block_single_to_single_violation():

@@ -12,11 +12,11 @@ import tempfile
 import pandas as pd
 import pyreadstat
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-
 from logic_platform.artifacts import (
     RECODING_SCRUB_ARTIFACT_KEYS,
     RunArtifacts,
@@ -24,12 +24,14 @@ from logic_platform.artifacts import (
 )
 from logic_platform.digitization.logics_export import export_logics_json_from_questionnaire
 from logic_platform.digitization.pipeline import run_digitization_pipeline
-from logic_platform.fairset.streamlit_compat import prior_file_extract
+from logic_platform.fairset.analysis import prior_file_extract
 from logic_platform.fairset.structure import (
     coerce_recodings_deep,
     coerce_structure_recodings,
     normalize_structure,
 )
+from logic_platform.fairset.report_csv import fairset_report_to_csv
+from logic_platform.fairset.report_xlsx import fairset_report_to_xlsx_bytes
 from logic_platform.fairset.validator import run_review_from_dataframes
 from logic_platform.progress import build_run_progress
 
@@ -40,6 +42,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("logic_platform.api")
 load_dotenv()
+
+# Explicit Content-Type for artifact downloads so .xlsx opens in Excel instead of generic octet/stream.
+_ARTIFACT_SUFFIX_MEDIA_TYPES: dict[str, str] = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".sav": "application/x-spss-sav",
+    ".csv": "text/csv; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+# Friendly download names (disk path unchanged under the run folder).
+_ARTIFACT_ATTACHMENT_FILENAME: dict[str, str] = {
+    "fairset_report_xlsx": "FairsetReview.xlsx",
+}
 
 _env_web_dist = os.getenv("LOGIC_PLATFORM_WEB_DIST")
 if _env_web_dist and _env_web_dist.strip():
@@ -64,6 +82,8 @@ npm install && npm run build</pre>
 """
 
 app = FastAPI(title="Logic Platform API", version="0.1.0")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -90,6 +110,57 @@ def get_runs_root() -> Path:
     if configured is not None:
         return Path(configured)
     return Path(os.getenv("LOGIC_PLATFORM_RUNS_ROOT", "runs"))
+
+
+def _fairset_uploaded_row_count(artifacts: RunArtifacts) -> int | None:
+    """Rows in the Fairset file stored under ``inputs/`` (for Excel % summary)."""
+    inputs_dir = artifacts.run_dir / "inputs"
+    if not inputs_dir.is_dir():
+        return None
+    for path in sorted(inputs_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if "fairset" not in path.name.lower():
+            continue
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".csv":
+                return int(pd.read_csv(path).shape[0])
+            if suffix in {".xlsx", ".xls"}:
+                return int(pd.read_excel(path).shape[0])
+            if suffix == ".sav":
+                df, _ = pyreadstat.read_sav(str(path))
+                return int(df.shape[0])
+        except Exception:
+            continue
+    return None
+
+
+def sync_fairset_report_xlsx_from_json(artifacts: RunArtifacts) -> None:
+    """Create ``fairset_report.xlsx`` from ``fairset_report.json`` when the workbook is missing."""
+    xlsx_path = artifacts.path("fairset_report_xlsx")
+    if xlsx_path.is_file():
+        return
+    json_path = artifacts.path("fairset_report_json")
+    if not json_path.is_file():
+        return
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    if not isinstance(raw, list):
+        return
+    n = _fairset_uploaded_row_count(artifacts)
+    try:
+        blob = fairset_report_to_xlsx_bytes(raw, fairset_row_count=n)
+        artifacts.write_bytes("fairset_report_xlsx", blob)
+        logger.info("Materialized fairset_report.xlsx run_id=%s", artifacts.run_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not materialize fairset_report.xlsx run_id=%s: %s",
+            artifacts.run_id,
+            exc,
+        )
 
 
 @app.get("/health")
@@ -207,6 +278,8 @@ def _generate_fairset_structure_from_logics(artifacts: RunArtifacts) -> dict:
 
     with logics_path.open(encoding="utf-8") as f:
         logics = json.load(f)
+    if not isinstance(logics, dict):
+        raise HTTPException(status_code=400, detail="logics.json must contain a JSON object")
     rows = logics.get("rows", [])
     if not isinstance(rows, list):
         raise HTTPException(status_code=400, detail="logics.json rows must be a list")
@@ -314,6 +387,8 @@ def _logics_dataframe_from_run(artifacts: RunArtifacts) -> pd.DataFrame:
         raise HTTPException(status_code=404, detail="logics.json not found for this run")
     with logics_path.open(encoding="utf-8") as f:
         logics = json.load(f)
+    if not isinstance(logics, dict):
+        raise HTTPException(status_code=400, detail="logics.json must contain a JSON object")
     rows = logics.get("rows", [])
     if not isinstance(rows, list):
         raise HTTPException(status_code=400, detail="logics.json rows must be a list")
@@ -487,9 +562,10 @@ def list_runs() -> dict:
 def get_run(run_id: str) -> dict:
     logger.info("Fetching run status run_id=%s", run_id)
     artifacts = RunArtifacts.create(get_runs_root(), run_id=run_id)
-    existing = artifacts.list_existing()
     if not artifacts.run_dir.is_dir():
         raise HTTPException(status_code=404, detail="Run not found")
+    sync_fairset_report_xlsx_from_json(artifacts)
+    existing = artifacts.list_existing()
     return {
         "run_id": run_id,
         "artifacts": {key: path.name for key, path in existing.items()},
@@ -512,6 +588,7 @@ def update_run_metadata(run_id: str, payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail="project_name must be 120 characters or fewer")
 
     artifacts.append_event({"event": "project_renamed", "project_name": project_name})
+    sync_fairset_report_xlsx_from_json(artifacts)
     return {
         "run_id": run_id,
         "artifacts": {key: path.name for key, path in artifacts.list_existing().items()},
@@ -534,11 +611,15 @@ def download_artifact(run_id: str, artifact_key: str) -> FileResponse | Response
     logger.info("Downloading artifact run_id=%s artifact_key=%s", run_id, artifact_key)
     try:
         artifacts = RunArtifacts.create(get_runs_root(), run_id=run_id)
-        path = artifacts.path(artifact_key)
+        path = artifacts.existing_path(artifact_key)
     except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=404, detail="Artifact not found") from exc
 
-    if not path.is_file():
+    if artifact_key == "fairset_report_xlsx" and path is None:
+        sync_fairset_report_xlsx_from_json(artifacts)
+        path = artifacts.existing_path(artifact_key)
+
+    if path is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     if artifact_key in RECODING_SCRUB_ARTIFACT_KEYS:
@@ -555,7 +636,13 @@ def download_artifact(run_id: str, artifact_key: str) -> FileResponse | Response
             headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
         )
 
-    return FileResponse(path, filename=path.name)
+    download_filename = _ARTIFACT_ATTACHMENT_FILENAME.get(artifact_key, path.name)
+
+    suffix = path.suffix.lower()
+    media = _ARTIFACT_SUFFIX_MEDIA_TYPES.get(suffix)
+    if media:
+        return FileResponse(path, filename=download_filename, media_type=media)
+    return FileResponse(path, filename=download_filename)
 
 
 @app.post("/runs/logics/from-questionnaire")
@@ -651,55 +738,77 @@ def generate_fairset_structure_from_history(run_id: str) -> dict:
 async def review_fairset_from_history(run_id: str, fairset_file: UploadFile = File(...)) -> dict:
     """Review an uploaded Fairset against the data/logics saved in a previous run."""
     logger.info("Reviewing Fairset from history run_id=%s fairset=%s", run_id, fairset_file.filename)
-    artifacts = RunArtifacts.create(get_runs_root(), run_id=run_id)
-    if not artifacts.run_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Run not found")
-
     try:
-        train_df = _read_tabular_path(_saved_data_file(artifacts))
-        fairset_df = await read_tabular_upload(fairset_file, "fairset_file")
-        prior_df = _logics_dataframe_from_run(artifacts)
-        result = run_review_from_dataframes(
-            prior_df,
-            train_df,
-            fairset_df,
-            questionnaire=_questionnaire_from_run(artifacts),
+        artifacts = RunArtifacts.create(get_runs_root(), run_id=run_id)
+        if not artifacts.run_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        try:
+            train_df = _read_tabular_path(_saved_data_file(artifacts))
+            fairset_df = await read_tabular_upload(fairset_file, "fairset_file")
+            prior_df = _logics_dataframe_from_run(artifacts)
+            result = run_review_from_dataframes(
+                prior_df,
+                train_df,
+                fairset_df,
+                questionnaire=_questionnaire_from_run(artifacts),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        input_dir = artifacts.ensure() / "inputs"
+        input_dir.mkdir(exist_ok=True)
+        fairset_suffix = Path(fairset_file.filename or "fairset").suffix or ".data"
+        fairset_path = input_dir / f"fairset{fairset_suffix}"
+        await fairset_file.seek(0)
+        fairset_path.write_bytes(await fairset_file.read())
+
+        artifacts.write_json("fairset_constraints", result.constraints)
+        artifacts.write_json("structure_json", result.structure)
+        artifacts.write_json("fairset_structure", result.structure)
+        artifacts.write_text("fairset_report", fairset_report_to_csv(result.report))
+        artifacts.write_json("fairset_report_json", result.report)
+        artifacts.write_bytes(
+            "fairset_report_xlsx",
+            fairset_report_to_xlsx_bytes(result.report, fairset_row_count=int(fairset_df.shape[0])),
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        artifacts.append_event(
+            {
+                "event": "fairset_review_completed",
+                "fairset_filename": fairset_file.filename,
+                "report_rows": len(result.report),
+                "missing_columns": len(result.missing_columns),
+                "warnings": len(result.warnings),
+            }
+        )
 
-    input_dir = artifacts.ensure() / "inputs"
-    input_dir.mkdir(exist_ok=True)
-    fairset_suffix = Path(fairset_file.filename or "fairset").suffix or ".data"
-    fairset_path = input_dir / f"fairset{fairset_suffix}"
-    await fairset_file.seek(0)
-    fairset_path.write_bytes(await fairset_file.read())
-
-    artifacts.write_json("fairset_constraints", result.constraints)
-    artifacts.write_json("structure_json", result.structure)
-    artifacts.write_json("fairset_structure", result.structure)
-    artifacts.write_json("fairset_report", result.report)
-    artifacts.append_event(
-        {
-            "event": "fairset_review_completed",
-            "fairset_filename": fairset_file.filename,
-            "report_rows": len(result.report),
-            "missing_columns": len(result.missing_columns),
-            "warnings": len(result.warnings),
+        payload = {
+            "run_id": run_id,
+            "status": "complete" if not result.missing_columns else "missing_columns",
+            "missing_columns": result.missing_columns,
+            "warnings": result.warnings,
+            "artifacts": _artifact_response(
+                artifacts,
+                [
+                    "fairset_report",
+                    "fairset_report_json",
+                    "fairset_report_xlsx",
+                    "structure_json",
+                    "fairset_constraints",
+                    "logics_json",
+                ],
+            ),
+            "report": result.report,
         }
-    )
-
-    return {
-        "run_id": run_id,
-        "status": "complete" if not result.missing_columns else "missing_columns",
-        "missing_columns": result.missing_columns,
-        "warnings": result.warnings,
-        "artifacts": _artifact_response(
-            artifacts,
-            ["fairset_report", "structure_json", "fairset_constraints", "logics_json"],
-        ),
-        "report": result.report,
-    }
+        return jsonable_encoder(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Fairset review failed run_id=%s", run_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
 
 
 @app.post("/runs/logics")
@@ -821,31 +930,48 @@ async def review_fairset(
         fairset_file.filename,
         logics_file.filename,
     )
-    train_df = await read_csv_upload(train_file, "train_file")
-    fairset_df = await read_csv_upload(fairset_file, "fairset_file")
-    prior_df = await read_csv_upload(logics_file, "logics_file")
-
     try:
-        result = run_review_from_dataframes(prior_df, train_df, fairset_df)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        train_df = await read_csv_upload(train_file, "train_file")
+        fairset_df = await read_csv_upload(fairset_file, "fairset_file")
+        prior_df = await read_csv_upload(logics_file, "logics_file")
 
-    artifacts = RunArtifacts.create(get_runs_root(), run_id=None)
-    constraints_path = artifacts.write_json("fairset_constraints", result.constraints)
-    structure_path = artifacts.write_json("fairset_structure", result.structure)
-    report_path = artifacts.write_json("fairset_report", result.report)
+        try:
+            result = run_review_from_dataframes(prior_df, train_df, fairset_df)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {
-        "run_id": artifacts.run_id,
-        "missing_columns": result.missing_columns,
-        "warnings": result.warnings,
-        "artifacts": {
-            "fairset_constraints": constraints_path.name,
-            "fairset_structure": structure_path.name,
-            "fairset_report": report_path.name,
-        },
-        "report": result.report,
-    }
+        artifacts = RunArtifacts.create(get_runs_root(), run_id=None)
+        constraints_path = artifacts.write_json("fairset_constraints", result.constraints)
+        structure_path = artifacts.write_json("fairset_structure", result.structure)
+        report_csv_path = artifacts.write_text("fairset_report", fairset_report_to_csv(result.report))
+        report_json_path = artifacts.write_json("fairset_report_json", result.report)
+        report_xlsx_path = artifacts.write_bytes(
+            "fairset_report_xlsx",
+            fairset_report_to_xlsx_bytes(result.report, fairset_row_count=int(fairset_df.shape[0])),
+        )
+
+        payload = {
+            "run_id": artifacts.run_id,
+            "missing_columns": result.missing_columns,
+            "warnings": result.warnings,
+            "artifacts": {
+                "fairset_constraints": constraints_path.name,
+                "fairset_structure": structure_path.name,
+                "fairset_report": report_csv_path.name,
+                "fairset_report_json": report_json_path.name,
+                "fairset_report_xlsx": report_xlsx_path.name,
+            },
+            "report": result.report,
+        }
+        return jsonable_encoder(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Legacy fairset review failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
 
 
 _web_assets_dir = _WEB_DIST / "assets"

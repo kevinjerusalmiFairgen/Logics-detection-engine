@@ -74,6 +74,26 @@ def test_write_json_sanitizes_fairset_constraints_nested_recodings(tmp_path):
     assert data["extra"]["recodings"][0]["codes"] == ["SRC"]
 
 
+def test_fairset_report_legacy_json_lists_and_prefers_csv_when_both_exist(tmp_path):
+    run = RunArtifacts.create(tmp_path, run_id="legacy_run")
+    run.run_dir.mkdir(parents=True, exist_ok=True)
+    legacy_path = run.run_dir / "fairset_report.json"
+    legacy_path.write_text('{"entries": []}', encoding="utf-8")
+
+    listed = run.list_existing()
+    assert listed["fairset_report"] == legacy_path
+    assert listed["fairset_report_json"] == legacy_path
+    assert run.existing_path("fairset_report") == legacy_path
+
+    csv_path = run.run_dir / "fairset_report.csv"
+    csv_path.write_text("Section,Question\n", encoding="utf-8")
+
+    listed2 = run.list_existing()
+    assert listed2["fairset_report"] == csv_path
+    assert listed2["fairset_report_json"] == legacy_path.parent / "fairset_report.json"
+    assert run.existing_path("fairset_report") == csv_path
+
+
 def test_canonical_artifacts_match_refactor_plan_names():
     assert CANONICAL_ARTIFACTS == {
         "pdf_structure": "01_pdf_structure.json",
@@ -91,6 +111,7 @@ def test_canonical_artifacts_match_refactor_plan_names():
         "fairset_constraints": "fairset_constraints.json",
         "structure_json": "structure.json",
         "fairset_structure": "fairset_structure.json",
-        "fairset_report": "fairset_report.json",
+        "fairset_report": "fairset_report.csv",
+        "fairset_report_json": "fairset_report.json",
         "fairset_report_xlsx": "fairset_report.xlsx",
     }

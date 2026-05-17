@@ -18,7 +18,7 @@ HELPER_COLUMN_PATTERNS = (
 
 
 def normalize_structure(
-    structure: dict[str, Any],
+    structure: dict[str, Any] | None,
     *,
     prior_df: pd.DataFrame | None = None,
     questionnaire: dict[str, Any] | None = None,
@@ -38,6 +38,8 @@ def normalize_structure(
       string** when none (legacy tooling); a JSON **array** of strings when there
       are multiple targets.
     """
+    if not isinstance(structure, dict):
+        structure = {}
     normalized = {
         "recodings": _dedupe_recodings(
             _normalize_recoding_arrays(structure.get("recodings", []))
@@ -150,6 +152,8 @@ def _build_multiselects(
             by_id.setdefault(item["id"], item)
 
     for item in structure.get("multiSelect", []):
+        if not isinstance(item, dict):
+            continue
         columns = _clean_columns(item.get("columns") or item.get("codes") or [])
         if not columns or _has_columns(by_id.values(), columns):
             continue
@@ -176,8 +180,16 @@ def _questionnaire_multiselects(questionnaire: dict[str, Any] | None) -> list[di
     if not questionnaire:
         return []
 
+    raw_questions = questionnaire.get("questions")
+    if raw_questions is None:
+        raw_questions = []
+    if not isinstance(raw_questions, list):
+        return []
+
     out: list[dict[str, Any]] = []
-    for question in questionnaire.get("questions", []):
+    for question in raw_questions:
+        if not isinstance(question, dict):
+            continue
         if question.get("type") != "multi_select":
             continue
         columns = _clean_columns([str(value) for value in flatten_vars(question.get("vars", []))])

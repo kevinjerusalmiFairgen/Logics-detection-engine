@@ -27,7 +27,8 @@ CANONICAL_ARTIFACTS = {
     "fairset_constraints": "fairset_constraints.json",
     "structure_json": "structure.json",
     "fairset_structure": "fairset_structure.json",
-    "fairset_report": "fairset_report.json",
+    "fairset_report": "fairset_report.csv",
+    "fairset_report_json": "fairset_report.json",
     "fairset_report_xlsx": "fairset_report.xlsx",
 }
 
@@ -39,7 +40,6 @@ RECODING_SCRUB_ARTIFACT_KEYS = frozenset(
         "structure_json",
         "fairset_structure",
         "fairset_constraints",
-        "fairset_report",
     }
 )
 
@@ -92,6 +92,23 @@ class RunArtifacts:
             raise KeyError(f"Unknown artifact key: {artifact_key}") from exc
         return self.run_dir / filename
 
+    def existing_path(self, artifact_key: str) -> Path | None:
+        """Return the on-disk path if the artifact exists.
+
+        ``fairset_report`` accepts either ``fairset_report.csv`` (current) or legacy
+        ``fairset_report.json`` so older runs still download.
+        """
+        if artifact_key not in CANONICAL_ARTIFACTS:
+            raise KeyError(f"Unknown artifact key: {artifact_key!r}")
+        if artifact_key == "fairset_report":
+            for name in ("fairset_report.csv", "fairset_report.json"):
+                resolved = self.run_dir / name
+                if resolved.is_file():
+                    return resolved
+            return None
+        candidate = self.path(artifact_key)
+        return candidate if candidate.is_file() else None
+
     def write_json(self, artifact_key: str, payload: Any, *, indent: int = 2) -> Path:
         self.ensure()
         path = self.path(artifact_key)
@@ -118,12 +135,18 @@ class RunArtifacts:
             f.write(content)
         return path
 
+    def write_bytes(self, artifact_key: str, content: bytes) -> Path:
+        self.ensure()
+        path = self.path(artifact_key)
+        path.write_bytes(content)
+        return path
+
     def list_existing(self) -> dict[str, Path]:
         if not self.run_dir.is_dir():
             return {}
         out: dict[str, Path] = {}
         for key in CANONICAL_ARTIFACTS:
-            candidate = self.path(key)
-            if candidate.is_file():
-                out[key] = candidate
+            resolved = self.existing_path(key)
+            if resolved is not None:
+                out[key] = resolved
         return out

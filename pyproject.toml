@@ -13,6 +13,8 @@ dependencies = [
   "python-docx>=1.0.0",
   "python-dotenv>=1.0.0",
   "pandas>=2.0.0",
+  "tqdm>=4.66.0",
+  "xlsxwriter>=3.2.0",
   "google-genai>=1.0.0",
   "anthropic[vertex]>=0.39.0",
   "fastapi>=0.115.0",
@@ -24,7 +26,9 @@ dependencies = [
 dev = ["pytest>=8.0.0"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["logic_platform*", "apps*"]
+exclude = ["tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

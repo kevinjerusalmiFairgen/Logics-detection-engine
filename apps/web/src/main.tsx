@@ -54,9 +54,68 @@ function fileStem(filename: string) {
 const ARTIFACT_DOWNLOAD_NAMES: Record<string, string> = {
   questionnaire_final: "questionnaire.json",
   structure_json: "structure.json",
-  fairset_report: "fairset_report.json",
+  fairset_report: "fairset_report.csv",
+  fairset_report_xlsx: "FairsetReview.xlsx",
   logics_json: "logics.json",
 };
+
+/** Blob MIME when saving (avoids “Download” / wrong app when dev proxy strips Content-Type). */
+const ARTIFACT_DOWNLOAD_BLOB_TYPES: Partial<Record<string, string>> = {
+  fairset_report_xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  questionnaire_final: "application/json; charset=utf-8",
+  structure_json: "application/json; charset=utf-8",
+  logics_json: "application/json; charset=utf-8",
+};
+
+/** Read body once; JSON when possible so plain-text/HTML errors do not surface as SyntaxError. */
+async function parseResponseJson(res: Response): Promise<unknown> {
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {};
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    const hint = res.ok ? "Invalid JSON from server" : `Server error (${res.status})`;
+    const clip = trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed;
+    throw new Error(clip ? `${hint}: ${clip}` : hint);
+  }
+}
+
+/** FastAPI uses ``detail`` (string or validation list); some routes use ``message`` / ``missing_columns``. */
+function errorMessageFromApiBody(body: unknown): string | null {
+  if (!body || typeof body !== "object") {
+    return null;
+  }
+  const o = body as Record<string, unknown>;
+  const d = o.detail;
+  if (typeof d === "string" && d.trim()) {
+    return d.trim();
+  }
+  if (Array.isArray(d) && d.length > 0) {
+    const first = d[0];
+    if (first && typeof first === "object" && "msg" in first) {
+      const msg = (first as { msg?: unknown }).msg;
+      if (typeof msg === "string" && msg.trim()) {
+        return msg.trim();
+      }
+    }
+    try {
+      return JSON.stringify(d);
+    } catch {
+      return String(d);
+    }
+  }
+  if (typeof o.message === "string" && o.message.trim()) {
+    return o.message.trim();
+  }
+  const mc = o.missing_columns;
+  if (Array.isArray(mc) && mc.length > 0 && mc.every((x) => typeof x === "string")) {
+    return `Missing columns: ${mc.join(", ")}`;
+  }
+  return null;
+}
 
 function parseContentDispositionFilename(header: string | null): string | null {
   if (!header) {
@@ -202,18 +261,25 @@ function App() {
       if (!res.ok) {
         let msg = `Download failed (${res.status})`;
         try {
-          const j = (await res.json()) as { detail?: string };
-          if (j.detail) {
+          const parsed = await parseResponseJson(res);
+          const j = parsed as { detail?: string };
+          if (typeof j.detail === "string" && j.detail) {
             msg = j.detail;
           }
-        } catch {
-          /* ignore */
+        } catch (e) {
+          if (e instanceof Error) {
+            msg = e.message;
+          }
         }
         throw new Error(msg);
       }
       const name =
         parseContentDispositionFilename(res.headers.get("Content-Disposition")) ?? fallback;
-      const blob = await res.blob();
+      const buf = await res.arrayBuffer();
+      const forced = ARTIFACT_DOWNLOAD_BLOB_TYPES[artifactKey];
+      const headerType = res.headers.get("Content-Type")?.split(";")[0]?.trim();
+      const blobType = forced ?? headerType ?? "application/octet-stream";
+      const blob = new Blob([buf], { type: blobType });
       const obj = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = obj;
@@ -225,6 +291,18 @@ function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Download failed.");
     }
+  }
+
+  /** After Fairset review, open the FairsetReview .xlsx (server creates it from JSON if missing). */
+  async function maybeAutoDownloadFairsetExcelReport(runId: string, artifacts: Record<string, string>) {
+    const has =
+      artifacts.fairset_report_xlsx === "fairset_report.xlsx" ||
+      artifacts.fairset_report_json === "fairset_report.json";
+    if (!has) {
+      return;
+    }
+    await sleep(320);
+    await downloadRunArtifact({ run_id: runId, artifacts }, "fairset_report_xlsx");
   }
 
   function stopPolling() {
@@ -241,7 +319,7 @@ function App() {
         setError("Could not load previous projects.");
         return;
       }
-      const body = (await response.json()) as { runs?: Project[] };
+      const body = (await parseResponseJson(response)) as { runs?: Project[] };
       // List every run dir: in-progress jobs often have empty `artifacts` here because
       // intermediates are stored as s1_*.json while the API only keys canonical outputs.
       setProjects(
@@ -253,14 +331,14 @@ function App() {
       setError(
         API_BASE
           ? `Could not reach the API at ${API_BASE}.`
-          : "Could not reach the API. Start uvicorn on port 8000 (or run Vite dev so /runs is proxied).",
+          : "Could not reach the API on port 8000. From repo root run: PYTHONPATH=src:. python -m apps.api — then reload (built UI at http://127.0.0.1:8000) or npm run dev and open http://127.0.0.1:5173.",
       );
     }
   }
 
   function projectListHint(project: Project) {
     const a = project.artifacts ?? {};
-    if (a.fairset_report) return "reviewed";
+    if (a.fairset_report_xlsx || a.fairset_report || a.fairset_report_json) return "reviewed";
     if (a.structure_json) return "ready";
     if (a.logics_json) return "extracting…";
     if (Object.keys(a).length > 0) return "…";
@@ -276,7 +354,7 @@ function App() {
         window.localStorage.removeItem(ACTIVE_PROJECT_KEY);
         return;
       }
-      const body = (await response.json()) as ApiResult;
+      const body = (await parseResponseJson(response)) as ApiResult;
       if (!body.run_id) {
         setError("Invalid project response from API.");
         return;
@@ -310,7 +388,7 @@ function App() {
       if (!runRes.ok) {
         throw new Error("Could not load run after pipeline.");
       }
-      let proj = (await runRes.json()) as ApiResult;
+      let proj = (await parseResponseJson(runRes)) as ApiResult;
       let arts = proj.artifacts ?? {};
 
       if (!arts.logics_json) {
@@ -321,11 +399,17 @@ function App() {
         setBusy("Structure…");
         const sRes = await fetch(`${API_BASE}/runs/${runId}/fairset-structure`, { method: "POST" });
         if (!sRes.ok) {
-          const detail = (await sRes.json().catch(() => ({}))) as { detail?: string };
+          let detailParsed: unknown = {};
+          try {
+            detailParsed = await parseResponseJson(sRes);
+          } catch {
+            /* non-JSON error body */
+          }
+          const detail = detailParsed as { detail?: string };
           throw new Error(detail.detail ?? "Could not build structure.json.");
         }
         runRes = await fetch(`${API_BASE}/runs/${runId}`);
-        proj = (await runRes.json()) as ApiResult;
+        proj = (await parseResponseJson(runRes)) as ApiResult;
         arts = proj.artifacts ?? {};
       }
 
@@ -337,20 +421,24 @@ function App() {
         const fd = new FormData();
         fd.append("fairset_file", queuedFairset);
         const rv = await fetch(`${API_BASE}/runs/${runId}/fairset-review`, { method: "POST", body: fd });
-        const reviewBody = (await rv.json()) as ApiResult;
+        const reviewBody = (await parseResponseJson(rv)) as ApiResult;
         if (!rv.ok) {
           throw new Error(
-            reviewBody.message ?? reviewBody.missing_columns?.join(", ") ?? "Fairset review failed.",
+            errorMessageFromApiBody(reviewBody) ??
+              `Fairset review failed (${rv.status}).`,
           );
         }
         const refreshed = await fetch(`${API_BASE}/runs/${runId}`);
-        const refreshedProject = refreshed.ok ? ((await refreshed.json()) as ApiResult) : proj;
+        const refreshedProject = refreshed.ok ? ((await parseResponseJson(refreshed)) as ApiResult) : proj;
+        const nextArts = refreshedProject.artifacts ?? {};
         setSelectedProject({
           ...reviewBody,
-          artifacts: refreshedProject.artifacts ?? {},
+          artifacts: nextArts,
           progress: refreshedProject.progress,
         });
         setNewFairsetOptional(null);
+        setBusy("Excel report…");
+        await maybeAutoDownloadFairsetExcelReport(runId, nextArts);
       } else if (shouldDownloadPack) {
         setBusy("Downloads…");
         if (arts.questionnaire_final) {
@@ -361,7 +449,7 @@ function App() {
           await sleep(600);
         }
         runRes = await fetch(`${API_BASE}/runs/${runId}`);
-        proj = (await runRes.json()) as ApiResult;
+        proj = (await parseResponseJson(runRes)) as ApiResult;
         arts = proj.artifacts ?? {};
         if (arts.structure_json) {
           await downloadRunArtifact(
@@ -387,7 +475,7 @@ function App() {
       if (!response.ok) {
         return;
       }
-      const nextProgress = (await response.json()) as RunProgress;
+      const nextProgress = (await parseResponseJson(response)) as RunProgress;
       setProgress(nextProgress);
       if (nextProgress.status === "complete" || nextProgress.status === "failed") {
         stopPolling();
@@ -427,7 +515,7 @@ function App() {
         method: "POST",
         body: formData,
       });
-      const body = (await response.json()) as ApiResult;
+      const body = (await parseResponseJson(response)) as ApiResult;
       if (!response.ok) {
         throw new Error(body.message ?? "Could not start extraction.");
       }
@@ -467,7 +555,7 @@ function App() {
         method: "POST",
         body: formData,
       });
-      const body = (await response.json()) as ApiResult;
+      const body = (await parseResponseJson(response)) as ApiResult;
       if (!response.ok) {
         throw new Error(body.message ?? "Could not generate structure.");
       }
@@ -497,7 +585,12 @@ function App() {
         method: "POST",
       });
       if (!response.ok) {
-        const body = await response.json();
+        let body: { detail?: string } = {};
+        try {
+          body = (await parseResponseJson(response)) as { detail?: string };
+        } catch (e) {
+          throw new Error(e instanceof Error ? e.message : "Could not generate structure.json.");
+        }
         throw new Error(body.detail ?? "Could not generate structure.json.");
       }
       await openProject(selectedProject.run_id);
@@ -526,7 +619,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_name: nextName }),
       });
-      const body = (await response.json()) as ApiResult;
+      const body = (await parseResponseJson(response)) as ApiResult;
       if (!response.ok) {
         throw new Error(body.message ?? "Could not rename project.");
       }
@@ -559,16 +652,23 @@ function App() {
         method: "POST",
         body: formData,
       });
-      const body = (await response.json()) as ApiResult;
+      const body = (await parseResponseJson(response)) as ApiResult;
       if (!response.ok) {
-        throw new Error(body.message ?? body.missing_columns?.join(", ") ?? "Fairset review failed.");
+        throw new Error(
+          errorMessageFromApiBody(body) ?? `Fairset review failed (${response.status}).`,
+        );
       }
       const refreshed = await fetch(`${API_BASE}/runs/${selectedProject.run_id}`);
-      const refreshedProject = refreshed.ok ? ((await refreshed.json()) as ApiResult) : selectedProject;
+      const refreshedProject = refreshed.ok
+        ? ((await parseResponseJson(refreshed)) as ApiResult)
+        : selectedProject;
       const arts = refreshedProject.artifacts ?? {};
+      const runId = selectedProject.run_id;
       setSelectedProject({ ...body, artifacts: arts, progress: refreshedProject.progress });
       setFairsetForReview(null);
       await loadProjects();
+      setBusy("Excel report…");
+      await maybeAutoDownloadFairsetExcelReport(runId, arts);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Fairset review failed.");
     } finally {
@@ -576,24 +676,35 @@ function App() {
     }
   }
 
-  const canDownloadQuestionnaire = Boolean(selectedProject?.artifacts?.questionnaire_final);
-  const canDownloadStructure = Boolean(selectedProject?.artifacts?.structure_json);
-  const canDownloadReport = Boolean(selectedProject?.artifacts?.fairset_report);
+  const arts = selectedProject?.artifacts ?? {};
+  const hasFairsetReviewReport =
+    Boolean(arts.fairset_report) ||
+    Boolean(arts.fairset_report_json) ||
+    Boolean(arts.fairset_report_xlsx);
+  const canDownloadQuestionnaire = Boolean(arts.questionnaire_final);
+  const canDownloadStructure = Boolean(arts.structure_json);
+  /** Hide Fairset upload once any review output exists on disk (JSON, CSV, or Excel). */
+  const showFairsetReviewSection = !hasFairsetReviewReport;
 
   return (
     <main>
       <header className="topbar">
-        <h1>Logic</h1>
-        <button type="button" className="secondary compact" onClick={() => void loadProjects()}>
-          Refresh
-        </button>
+        <div className="brandBlock">
+          <p className="eyebrow">Survey logic workspace</p>
+          <h1>Logic Platform</h1>
+        </div>
+        <div className="topbarActions">
+          <button type="button" className="secondary compact" onClick={() => void loadProjects()}>
+            Refresh
+          </button>
+        </div>
       </header>
 
       {error && <div className="error">{error}</div>}
 
       <section className="layout">
         <aside className="sidebar">
-          <section className="panel">
+          <section className="panel sidebarCard">
             <div className="panelHeader">
               <h2>Projects</h2>
               <button className="textButton" onClick={() => setWorkspaceMode("new")}>
@@ -623,10 +734,15 @@ function App() {
           </section>
         </aside>
 
-        <section className="workspace">
+        <section className="workspace workspaceCard">
           {workspaceMode === "new" ? (
             <section className="menuBlock">
-              <p className="workspaceLead">PDF questionnaire and data required. Fairset optional.</p>
+              <div className="workspaceSectionHead">
+                <h3 className="workspaceSectionTitle">New extraction</h3>
+                <p className="workspaceLead">
+                  PDF questionnaire and training data required. Fairset is optional.
+                </p>
+              </div>
               <label className="titleField">
                 <span>Name</span>
                 <input
@@ -658,7 +774,7 @@ function App() {
               </div>
               <button
                 type="button"
-                className="primary"
+                className="primary ctaPrimary"
                 disabled={Boolean(busy) || !qnrFile || !dataFile}
                 onClick={() => void createProject()}
               >
@@ -691,12 +807,15 @@ function App() {
             <section className="menuBlock">
               {!selectedProject ? (
               <div className="emptyState">
+                <p className="emptyEyebrow">Workspace</p>
                 <strong>Select a project</strong>
+                <p className="muted emptyHint">Choose a run from the list or create a new extraction.</p>
               </div>
               ) : (
                 <>
                   <div className="projectHeader">
-                    <div>
+                    <div className="projectTitleBlock">
+                      <p className="eyebrow subtleEyebrow">Project</p>
                       <div className="renameRow">
                         <input
                           type="text"
@@ -716,12 +835,32 @@ function App() {
 
                   <ProgressStatus busy={busy} progress={progress} />
 
-                  <div className="outputStrip inlineLabel">
-                    <span>Files</span>
+                  <section className="workspaceSection">
+                    <h3 className="workspaceSectionTitle">Exports</h3>
+                    {hasFairsetReviewReport && selectedProject ? (
+                      <div className="fairsetReportBlock">
+                        <p className="workspaceSectionLead fairsetReportLead">
+                          <strong>Fairset review report</strong> — same formatted Excel as the FairsetReview app.
+                          Saves as <strong>FairsetReview.xlsx</strong>.
+                        </p>
+                        <button
+                          type="button"
+                          className="primary ctaPrimary fairsetReportBtn"
+                          disabled={Boolean(busy)}
+                          onClick={() => void downloadRunArtifact(selectedProject, "fairset_report_xlsx")}
+                        >
+                          Download FairsetReview report
+                        </button>
+                      </div>
+                    ) : null}
+                    {hasFairsetReviewReport ? (
+                      <p className="workspaceSectionLead exportsOtherLead">Pipeline files</p>
+                    ) : null}
+                    <div className="outputChips">
                     {canDownloadQuestionnaire && selectedProject ? (
                       <button
                         type="button"
-                        className="secondary compact"
+                        className="secondary compact chipBtn"
                         disabled={Boolean(busy)}
                         onClick={() => void downloadRunArtifact(selectedProject, "questionnaire_final")}
                       >
@@ -731,7 +870,7 @@ function App() {
                     {canDownloadStructure && selectedProject ? (
                       <button
                         type="button"
-                        className="secondary compact"
+                        className="secondary compact chipBtn"
                         disabled={Boolean(busy)}
                         onClick={() => void downloadRunArtifact(selectedProject, "structure_json")}
                       >
@@ -740,42 +879,45 @@ function App() {
                     ) : selectedProject?.artifacts?.logics_json ? (
                       <button
                         type="button"
-                        className="secondary compact"
+                        className="secondary compact chipBtn"
                         disabled={Boolean(busy)}
                         onClick={() => void generateStructure()}
                       >
                         {busy === "Generating structure.json" ? "…" : "structure.json"}
                       </button>
                     ) : null}
-                    {canDownloadReport && selectedProject ? (
-                      <button
-                        type="button"
-                        className="secondary compact"
-                        disabled={Boolean(busy)}
-                        onClick={() => void downloadRunArtifact(selectedProject, "fairset_report")}
-                      >
-                        report
-                      </button>
+                    {!canDownloadQuestionnaire &&
+                    !canDownloadStructure &&
+                    !selectedProject?.artifacts?.logics_json &&
+                    !hasFairsetReviewReport ? (
+                      <span className="exportsPlaceholder muted">Exports appear after the pipeline finishes.</span>
                     ) : null}
-                  </div>
+                    </div>
+                  </section>
 
-                  {!canDownloadReport ? (
-                    <div className="splitSection">
+                  {showFairsetReviewSection ? (
+                    <section className="workspaceSection workspaceSectionAccent">
+                      <h3 className="workspaceSectionTitle">Fairset review</h3>
+                      <p className="workspaceSectionLead">
+                        Upload a Fairset table and validate it against this run&apos;s logics and training data.
+                      </p>
+                      <div className="fairsetReviewLayout">
                       <FileInput
-                        label="Fairset"
+                        label="Fairset file"
                         accept=".sav,.csv,.xlsx,.xls"
-                        hint="Add anytime · same project"
+                        hint="Same project · optional re-run"
                         onChange={setFairsetForReview}
                       />
                       <button
                         type="button"
-                        className="primary"
+                        className="primary fairsetRunBtn"
                         disabled={Boolean(busy) || !fairsetForReview || !selectedProject?.artifacts?.logics_json}
                         onClick={() => void reviewFairset()}
                       >
                         {busy === "Fairset review" ? "…" : "Run Fairset review"}
                       </button>
-                    </div>
+                      </div>
+                    </section>
                   ) : null}
 
                   {selectedProject.missing_columns?.length ? (

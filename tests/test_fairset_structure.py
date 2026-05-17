@@ -49,6 +49,21 @@ def test_normalize_structure_enriches_multiselect_and_filters_helper_columns():
     assert "codes" not in structure["multiSelect"][0]
 
 
+def test_normalize_structure_accepts_none_structure():
+    structure = normalize_structure(None)
+    assert structure["recodings"] == []
+    assert structure["multiSelect"] == []
+    assert structure["typeOfNan"] == []
+
+
+def test_normalize_structure_questionnaire_questions_none_is_safe():
+    structure = normalize_structure(
+        {"recodings": [], "multiSelect": [], "typeOfNan": []},
+        questionnaire={"questions": None},
+    )
+    assert structure["multiSelect"] == []
+
+
 def test_normalize_structure_recoding_codes_array_recode_scalar_or_list():
     structure = normalize_structure(
         {

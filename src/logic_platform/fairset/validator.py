@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from logic_platform.fairset.streamlit_compat import (
+from logic_platform.fairset.analysis import (
     check_columns_presence,
     prior_file_extract,
     run_logic_analysis,
@@ -59,10 +59,12 @@ def run_review_from_dataframes(
 
 
 def evaluate_constraints(
-    constraints: dict[str, list], train_df: pd.DataFrame, fairset_df: pd.DataFrame
+    constraints: dict[str, list] | None, train_df: pd.DataFrame, fairset_df: pd.DataFrame
 ) -> list[dict[str, Any]]:
     report: list[dict[str, Any]] = []
-    for constraint in constraints.get("BF_SS", []):
+    if not isinstance(constraints, dict):
+        constraints = {}
+    for constraint in constraints.get("BF_SS", []) or []:
         source, target, detail, mode, is_supported = constraint
         if mode == "block_force":
             report.append(

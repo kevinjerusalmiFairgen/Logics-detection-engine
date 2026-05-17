@@ -1,63 +1,92 @@
 # Logic Platform
 
-Local app for turning a survey questionnaire PDF and dataset into:
+Local app for turning a survey questionnaire PDF and dataset into **`logics.json`**, **`structure.json`**, and **Fairset review** outputs (FairsetReview-style Excel report).
 
-- `logics.json`
-- `structure.json`
-- Fairset review reports
-
-The repo is organized around the platform now:
+Repo layout:
 
 ```text
-apps/api/          FastAPI app
-apps/web/          React + Vite UI
-src/logic_platform/ Python package and pipeline code
-tests/             Regression tests
+apps/api/           FastAPI + static UI (built `apps/web/dist`)
+apps/web/           React + Vite UI
+src/logic_platform/ Pipeline + Fairset integration
+tests/              Pytest
+Makefile            Convenience targets (optional)
+.env.example        Copy to `.env` and add secrets (not committed)
 ```
 
-## Setup
+## First-time setup (coworkers)
+
+Prerequisites: **Python 3.11+**, **Node 18+**, **npm**.
 
 ```bash
+git clone <this-repo-url>
+cd <repo-folder>
+
+make setup          # creates .venv from .env.example if needed, installs Python + npm deps
+
+# Edit .env and add MANUS_API_KEY (required for logics extraction).
+```
+
+Without `make`:
+
+```bash
+cp .env.example .env           # edit: MANUS_API_KEY only is enough for defaults
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
-
-cd apps/web
-npm install
+.venv/bin/pip install -U pip
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e .
+cd apps/web && npm install && cd ../..
 ```
 
-### Environment variables
+`pip install -e .` installs the `logic_platform` package and **`apps.api`** so you can run **`python -m apps.api`** without exporting `PYTHONPATH`.
 
-- **`MANUS_API_KEY`** — required for the default pipeline (**Manus**). Used by the web UI and `POST /runs/logics`.
-- **`GOOGLE_CLOUD_PROJECT`** / **`GOOGLE_CLOUD_LOCATION`** — only if you explicitly use **`engine=opus`** (Claude on Vertex AI). New clones default to **Manus**, so collaborators usually do **not** need GCP access.
+## Fairset review (included in-repo)
 
-## Run Locally
+Fairset-era prior parsing (**`prior_extract.py`**) and constraint checks (**`constraint_checks.py`**) live under **`logic_platform.fairset`**. **`analysis.py`** exposes JSON-safe wrappers for the API. No separate FairsetReview checkout or extra env vars.
 
-From the repo root:
+## Run locally
+
+Terminal 1 — API (`load_dotenv` reads `.env` from the current working directory; run from repo root):
 
 ```bash
-PYTHONPATH=src:. python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 --reload
+make api
+# same as:  .venv/bin/python -m apps.api
 ```
 
-In another terminal:
+- **http://127.0.0.1:8000** — FastAPI docs and (if **`npm run build`** was run) the built SPA.
+- **SPA from API only**: `cd apps/web && npm run build`, then reload the API — no second terminal needed.
+
+Terminal 2 — Vite dev UI (proxies `/runs` to port 8000):
 
 ```bash
-cd apps/web
-npm run dev
+make web
+# same as:  cd apps/web && npm run dev
 ```
 
-Open `http://127.0.0.1:5173`.
+Open **http://127.0.0.1:5173**.
 
-## Test
+Optional: **`VITE_API_BASE`** — only if the API is **not** on the same origin (see `apps/web/vite.config.ts` proxy).
+
+## Environment variables (`/.env`)
+
+| Variable | When |
+|---------|------|
+| **`MANUS_API_KEY`** | Default pipeline (**Manus**). Required for **`POST /runs/logics`** and the web wizard. |
+| **`GOOGLE_CLOUD_PROJECT`** | Only **`engine=opus`** (Claude on Vertex AI). Ignored if you stick to Manus. |
+| **`LOGIC_PLATFORM_RUNS_ROOT`** | Optional; defaults to `./runs`. |
+
+Secrets and local outputs stay out of git (see `.gitignore`).
+
+## Test before you push
 
 ```bash
-python -m pytest
-cd apps/web && npm run build
+make test
+# same as:
+#   .venv/bin/python -m pytest
+#   cd apps/web && npm run build
 ```
 
-## Local Files
+## Useful paths
 
-Generated runs, uploaded data, virtual environments, frontend dependencies, and caches are intentionally local-only and ignored by git.
+Generated runs live under `./runs/` (gitignored).
 
-Do not commit `.env`, raw survey data, PDFs, `.sav` files, generated `runs/`, or frontend `node_modules/`.
+Do **not** commit: `.env`, raw survey payloads, **`runs/`**, **`node_modules/`**, **`apps/web/dist/`**.

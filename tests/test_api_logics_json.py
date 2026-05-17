@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 import apps.api.main as api_main
 from apps.api.main import app
+from tests.test_fairset_report_xlsx_layout import assert_fairset_review_xlsx_layout
 
 
 def fake_pipeline(pdf_path, data_path, artifacts, *, engine="manus", skip_validation=True):
@@ -222,10 +223,15 @@ def test_fairset_review_endpoint_uses_saved_run_data_and_logics(monkeypatch, tmp
 
     assert response.status_code == 200
     body = response.json()
-    assert body["artifacts"]["fairset_report"] == "fairset_report.json"
+    assert body["artifacts"]["fairset_report"] == "fairset_report.csv"
+    assert body["artifacts"]["fairset_report_json"] == "fairset_report.json"
+    assert body["artifacts"]["fairset_report_xlsx"] == "fairset_report.xlsx"
     assert body["artifacts"]["structure_json"] == "structure.json"
     run_dir = tmp_path / run_id
+    assert (run_dir / "fairset_report.csv").is_file()
     assert (run_dir / "fairset_report.json").is_file()
+    assert (run_dir / "fairset_report.xlsx").is_file()
+    assert_fairset_review_xlsx_layout((run_dir / "fairset_report.xlsx").read_bytes())
     assert (run_dir / "inputs" / "fairset.csv").is_file()
 
 

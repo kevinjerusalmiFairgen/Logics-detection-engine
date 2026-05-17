@@ -1,39 +1,13 @@
-import importlib.util
-import sys
-import types
-from pathlib import Path
+"""Regression tests for ``prior_extract.priorFileExtract`` / ``check_columns_presence``."""
+
+from __future__ import annotations
 
 import pandas as pd
-import pytest
 
-
-FAIRSET_PRIOR_EXTRACT = Path(
-    "/Users/kevinjerusalmi/Programming/FairsetReview/scripts/priorFile_extract.py"
-)
-
-
-def load_prior_extract_module():
-    if not FAIRSET_PRIOR_EXTRACT.is_file():
-        pytest.skip("FairsetReview priorFile_extract.py is not available on this machine")
-
-    streamlit_stub = types.SimpleNamespace(
-        warning=lambda *args, **kwargs: None,
-        error=lambda *args, **kwargs: None,
-        stop=lambda *args, **kwargs: None,
-    )
-    sys.modules.setdefault("streamlit", streamlit_stub)
-
-    spec = importlib.util.spec_from_file_location(
-        "fairset_prior_extract_baseline", FAIRSET_PRIOR_EXTRACT
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+from logic_platform.fairset import prior_extract
 
 
 def test_prior_file_extract_maps_core_rows_to_constraints_and_structure():
-    module = load_prior_extract_module()
     prior = pd.DataFrame(
         [
             {
@@ -69,7 +43,7 @@ def test_prior_file_extract_maps_core_rows_to_constraints_and_structure():
         ]
     )
 
-    constraints_json, structure_json = module.priorFileExtract(prior)
+    constraints_json, structure_json = prior_extract.priorFileExtract(prior)
 
     assert constraints_json["BF_SS"] == [
         ["Q1", "Q2", "Q2 depends on Q1", "block_force", True]
@@ -91,7 +65,6 @@ def test_prior_file_extract_maps_core_rows_to_constraints_and_structure():
 
 
 def test_check_columns_presence_handles_stringified_lists_and_existing_empty_source_behavior():
-    module = load_prior_extract_module()
     prior = pd.DataFrame(
         {
             "Target": ["['Q1r1', 'Q1r2']", "Q2"],
@@ -100,7 +73,5 @@ def test_check_columns_presence_handles_stringified_lists_and_existing_empty_sou
     )
     dataset = pd.DataFrame(columns=["q1r1", "Q1r2", "Q2", "Q3"])
 
-    # Existing FairsetReview behavior reports a blank Source cell as [""].
-    # The Streamlit app special-cases this value; the refactor should make it
-    # an explicit parser warning instead of a column error.
-    assert module.check_columns_presence(prior, dataset, ["Target", "Source"]) == [""]
+    # Legacy FairsetReview behavior reports a blank Source cell as missing column ``""``.
+    assert prior_extract.check_columns_presence(prior, dataset, ["Target", "Source"]) == [""]
